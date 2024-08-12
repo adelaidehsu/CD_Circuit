@@ -139,14 +139,14 @@ def prop_attention_hh(rel, irrel, attention_mask,
     
     return rel_out, irrel_out, target_decomps, returned_att_probs
 
-def prop_layer_hh(rel, irrel, attention_mask, head_mask, 
+def prop_BERT_layer_hh(rel, irrel, attention_mask, head_mask, 
                   source_node_list, target_nodes, level, layer_patched_values,
-                  layer_module, device, att_probs = None, output_att_prob=False, mean_ablated=False, attention_name='attention'):
+                  layer_module, device, att_probs = None, output_att_prob=False, mean_ablated=False):
     
     rel_a, irrel_a, target_decomps, returned_att_probs = prop_attention_hh(rel, irrel, attention_mask, 
                                                                            head_mask, source_node_list, 
                                                                            target_nodes, level, layer_patched_values,
-                                                                           getattr(layer_module, attention_name),
+                                                                           layer_module.attention,
                                                                            device,
                                                                            att_probs, output_att_prob, mean_ablated=mean_ablated)
 
@@ -169,6 +169,37 @@ def prop_layer_hh(rel, irrel, attention_mask, head_mask,
     
     return rel_out, irrel_out, target_decomps, returned_att_probs
 
+def prop_GPT_layer_hh(rel, irrel, attention_mask, head_mask, 
+                  source_node_list, target_nodes, level, layer_patched_values,
+                  layer_module, device, att_probs = None, output_att_prob=False, mean_ablated=False):
+    
+    rel_ln, irrel_ln = prop_layer_norm(rel, irrel, )
+    
+    rel_a, irrel_a, target_decomps, returned_att_probs = prop_self_attention_hh(rel, irrel, attention_mask, 
+                                                                           head_mask, source_node_list, 
+                                                                           target_nodes, level, layer_patched_values,
+                                                                           layer_module.attn,
+                                                                           device,
+                                                                           att_probs, output_att_prob, mean_ablated=mean_ablated)
+
+    i_module = layer_module.intermediate
+    rel_id, irrel_id = prop_linear(rel_a, irrel_a, i_module.dense)
+    normalize_rel_irrel(rel_id, irrel_id)
+    
+    rel_iact, irrel_iact = prop_act(rel_id, irrel_id, i_module.intermediate_act_fn)
+    
+    o_module = layer_module.output
+    rel_od, irrel_od = prop_linear(rel_iact, irrel_iact, o_module.dense)
+    normalize_rel_irrel(rel_od, irrel_od)
+    
+    rel_tot = rel_od + rel_a
+    irrel_tot = irrel_od + irrel_a
+    normalize_rel_irrel(rel_tot, irrel_tot)
+
+    rel_out, irrel_out = prop_layer_norm(rel_tot, irrel_tot, o_module.LayerNorm)
+    
+    
+    return rel_out, irrel_out, target_decomps, returned_att_probs
 
 def prop_BERT_hh(encoding, model, source_node_list, target_nodes, device,
                              patched_values=None, att_list = None, output_att_prob=False, mean_ablated=False):
@@ -201,15 +232,14 @@ def prop_BERT_hh(encoding, model, source_node_list, target_nodes, device,
         else:
             layer_patched_values = None
             
-        rel_n, irrel_n, layer_target_decomps, returned_att_probs = prop_layer_hh(rel, irrel, extended_attention_mask, 
+        rel_n, irrel_n, layer_target_decomps, returned_att_probs = prop_BERT_layer_hh(rel, irrel, extended_attention_mask, 
                                                                                  layer_head_mask, source_node_list, 
                                                                                  target_nodes, i, 
                                                                                  layer_patched_values,
                                                                                  layer_module, 
                                                                                  device,
                                                                                  att_probs, output_att_prob,
-                                                                                 mean_ablated=mean_ablated,
-                                                                                 attention_name='attention')
+                                                                                 mean_ablated=mean_ablated)
         target_decomps.append(layer_target_decomps)
         normalize_rel_irrel(rel_n, irrel_n)
         rel, irrel = rel_n, irrel_n
@@ -263,23 +293,22 @@ def prop_GPT_hh(encoding, model, source_node_list, target_nodes, device,
         else:
             layer_patched_values = None
             
-        rel_n, irrel_n, layer_target_decomps, returned_att_probs = prop_layer_hh(rel, irrel, extended_attention_mask, 
+        rel_n, irrel_n, layer_target_decomps, returned_att_probs = prop_GPT_layer_hh(rel, irrel, extended_attention_mask, 
                                                                                  layer_head_mask, source_node_list, 
                                                                                  target_nodes, i, 
                                                                                  layer_patched_values,
                                                                                  layer_module, 
                                                                                  device,
                                                                                  att_probs, output_att_prob,
-                                                                                 mean_ablated=mean_ablated,
-                                                                                 attention_name='attn')
+                                                                                 mean_ablated=mean_ablated)
         target_decomps.append(layer_target_decomps)
         normalize_rel_irrel(rel_n, irrel_n)
         rel, irrel = rel_n, irrel_n
         
         if output_att_prob:
             att_probs_lst.append(returned_att_probs.squeeze(0))
-    
-    rel_out, irrel_out = prop_GPT_unembed(rel, irrel, model.classifier)
+    rel, irrel = prop_layer_norm(rel, irrel, model.ln_final)
+    rel_out, irrel_out = prop_GPT_unembed(rel, irrel, model.unembed)
     
     out_decomps = []
 
