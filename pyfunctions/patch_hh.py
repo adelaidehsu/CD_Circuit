@@ -141,12 +141,12 @@ def prop_attention_hh(rel, irrel, attention_mask,
 
 def prop_layer_hh(rel, irrel, attention_mask, head_mask, 
                   source_node_list, target_nodes, level, layer_patched_values,
-                  layer_module, device, att_probs = None, output_att_prob=False, mean_ablated=False):
+                  layer_module, device, att_probs = None, output_att_prob=False, mean_ablated=False, attention_name='attention'):
     
     rel_a, irrel_a, target_decomps, returned_att_probs = prop_attention_hh(rel, irrel, attention_mask, 
                                                                            head_mask, source_node_list, 
                                                                            target_nodes, level, layer_patched_values,
-                                                                           layer_module.attention,
+                                                                           getattr(layer_module, attention_name),
                                                                            device,
                                                                            att_probs, output_att_prob, mean_ablated=mean_ablated)
 
@@ -169,13 +169,14 @@ def prop_layer_hh(rel, irrel, attention_mask, head_mask,
     
     return rel_out, irrel_out, target_decomps, returned_att_probs
 
-def prop_classifier_model_hh(encoding, model, source_node_list, target_nodes, device,
+
+def prop_BERT_hh(encoding, model, source_node_list, target_nodes, device,
                              patched_values=None, att_list = None, output_att_prob=False, mean_ablated=False):
-    embedding_output = get_embeddings(encoding, model.bert)
+    embedding_output = get_embeddings(encoding, model)
     input_shape = encoding['input_ids'].size()
     extended_attention_mask = get_extended_attention_mask(attention_mask = encoding['attention_mask'], 
                                                           input_shape = input_shape, 
-                                                          bert_model = model.bert,
+                                                          model = model,
                                                           device = device)
     
     head_mask = [None] * model.bert.config.num_hidden_layers
@@ -207,7 +208,8 @@ def prop_classifier_model_hh(encoding, model, source_node_list, target_nodes, de
                                                                                  layer_module, 
                                                                                  device,
                                                                                  att_probs, output_att_prob,
-                                                                                 mean_ablated=mean_ablated)
+                                                                                 mean_ablated=mean_ablated,
+                                                                                 attention_name='attention')
         target_decomps.append(layer_target_decomps)
         normalize_rel_irrel(rel_n, irrel_n)
         rel, irrel = rel_n, irrel_n
@@ -228,7 +230,70 @@ def prop_classifier_model_hh(encoding, model, source_node_list, target_nodes, de
     
     return out_decomps, target_decomps, att_probs_lst
 
-def prop_classifier_model_hh_batched(encoding, model, source_node_list, target_nodes, device,
+
+def prop_GPT_hh(encoding, model, source_node_list, target_nodes, device,
+                             patched_values=None, att_list = None, output_att_prob=False, mean_ablated=False):
+    embedding_output = get_embeddings(encoding, model)
+    input_shape = encoding['input_ids'].size()
+
+    # still not sure what this does, exactly
+    extended_attention_mask = get_extended_attention_mask(encoding['attention_mask'], 
+                                                          input_shape, 
+                                                          model,
+                                                          device)
+    
+    head_mask = [None] * len(model.blocks)
+    
+    sh = list(embedding_output.shape)
+    sh[0] = len(source_node_list)
+    
+    rel = torch.zeros(sh, dtype = embedding_output.dtype, device = device)
+    irrel = torch.zeros(sh, dtype = embedding_output.dtype, device = device)
+    
+    irrel[:] = embedding_output[:]
+    
+    target_decomps = []
+    att_probs_lst = []
+    for i, layer_module in enumerate(model.blocks):
+        layer_head_mask = head_mask[i]
+        att_probs = None
+        
+        if patched_values is not None:
+            layer_patched_values = patched_values[i] #[512, 12, 64]
+        else:
+            layer_patched_values = None
+            
+        rel_n, irrel_n, layer_target_decomps, returned_att_probs = prop_layer_hh(rel, irrel, extended_attention_mask, 
+                                                                                 layer_head_mask, source_node_list, 
+                                                                                 target_nodes, i, 
+                                                                                 layer_patched_values,
+                                                                                 layer_module, 
+                                                                                 device,
+                                                                                 att_probs, output_att_prob,
+                                                                                 mean_ablated=mean_ablated,
+                                                                                 attention_name='attn')
+        target_decomps.append(layer_target_decomps)
+        normalize_rel_irrel(rel_n, irrel_n)
+        rel, irrel = rel_n, irrel_n
+        
+        if output_att_prob:
+            att_probs_lst.append(returned_att_probs.squeeze(0))
+    
+    rel_out, irrel_out = prop_GPT_unembed(rel, irrel, model.classifier)
+    
+    out_decomps = []
+
+    for i, sn_list in enumerate(source_node_list):
+        rel_vec = rel_out[i, :].detach().cpu().numpy()
+        irrel_vec = irrel_out[i, :].detach().cpu().numpy()
+        
+        out_decomps.append((rel_vec, irrel_vec))
+    
+    return out_decomps, target_decomps, att_probs_lst
+
+import transformers # hack, just so the isinstance works
+import transformer_lens
+def prop_model_hh_batched(encoding, model, source_node_list, target_nodes, device,
                                      patched_values=None, 
                                      num_at_time = 64, n_layers = 12, att_list = None, output_att_prob=False,
                                      mean_ablated=False):
@@ -242,13 +307,23 @@ def prop_classifier_model_hh_batched(encoding, model, source_node_list, target_n
     for b_no in range(n_batches):
         b_st = b_no * num_at_time
         b_end = min(b_st + num_at_time, n_source_lists)
-        layer_out_decomps, layer_target_decomps, att_probs_lst = prop_classifier_model_hh(encoding, model, 
-                                                                           source_node_list[b_st: b_end],
-                                                                           target_nodes, device,
-                                                                           patched_values,
-                                                                           att_list=att_list,
-                                                                           output_att_prob=output_att_prob,
-                                                                           mean_ablated=mean_ablated)
+        if isinstance(model, transformers.models.bert.modeling_bert.BertForSequenceClassification):
+            layer_out_decomps, layer_target_decomps, att_probs_lst = prop_BERT_hh(encoding, model, 
+                                                                            source_node_list[b_st: b_end],
+                                                                            target_nodes, device,
+                                                                            patched_values,
+                                                                            att_list=att_list,
+                                                                            output_att_prob=output_att_prob,
+                                                                            mean_ablated=mean_ablated)
+        elif isinstance(model, transformer_lens.HookedTransformer):
+            layer_out_decomps, layer_target_decomps, att_probs_lst = prop_GPT_hh(encoding, model, 
+                                                                            source_node_list[b_st: b_end],
+                                                                            target_nodes, device,
+                                                                            patched_values,
+                                                                            att_list=att_list,
+                                                                            output_att_prob=output_att_prob,
+                                                                            mean_ablated=mean_ablated)
+
         out_decomps = out_decomps + layer_out_decomps
         target_decomps = [target_decomps[i] + layer_target_decomps[i] for i in range(n_layers)]
     
