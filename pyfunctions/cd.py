@@ -30,7 +30,7 @@ def get_encoding(text, tokenizer, device):
                                  return_tensors="pt").to(device)
     return encoding
 
-def get_embeddings(encoding, model):
+def get_embeddings_bert(encoding, model):
     # hack, just do hardcoded casework for attrs we know are there
     if hasattr(model, "bert"):
         embedding_output = model.bert.embeddings(
@@ -95,6 +95,7 @@ def prop_act(rel, irrel, act_module):
     return rel_act, irrel_act
 """
 
+# TODO: does this work correctly for all activations, or is this assuming GELU, or something else?
 def prop_act(r, ir, act_mod):
     ir_act = act_mod(ir)
     r_act = act_mod(r + ir) - ir_act
@@ -117,6 +118,7 @@ def prop_linear_core(rel, irrel, W, b):
 def prop_linear(rel, irrel, linear_module, tol = 1e-8):
     return prop_linear_core(rel, irrel, linear_module.weight.T, linear_module.bias)
 
+# this function doesn't really need to exist, it's not like it saves any lines
 def prop_GPT_unembed(rel, irrel, unembed_module, tol = 1e-8):
     return prop_linear_core(rel, irrel, unembed_module.W_U, unembed_module.b_U)
 
@@ -131,7 +133,18 @@ def prop_layer_norm(rel, irrel, layer_norm_module, tol = 1e-8):
     rel_wt = torch.abs(rel)
     irrel_wt = torch.abs(irrel)
     tot_wt = rel_wt + irrel_wt + tol
-    
+    '''
+    # huge hack; instead can refactor function signature but i don't have the tools to do this without editing in at least 30 places
+    if hasattr(layer_norm_module, "eps"):
+        epsilon = layer_norm_module.eps
+        weight = layer_norm_module.weight
+        bias = layer_norm_module.bias
+    else:
+        epsilon = layer_norm_module.cfg.layer_norm_eps
+        weight = layer_norm_module.w
+        bias = layer_norm_module.b
+    '''
+
     rel_t = ((rel - rel_mn) / torch.sqrt(vr + layer_norm_module.eps)) * layer_norm_module.weight
     irrel_t = ((irrel - irrel_mn) / torch.sqrt(vr + layer_norm_module.eps)) * layer_norm_module.weight
     
@@ -150,7 +163,7 @@ def prop_pooler(rel, irrel, pooler_module):
     return rel_out, irrel_out
 
 def prop_classifier_model(encoding, rel_ind_list, model, device, att_list = None):
-    embedding_output = get_embeddings(encoding, model)
+    embedding_output = get_embeddings_bert(encoding, model)
     input_shape = encoding['input_ids'].size()
     extended_attention_mask = get_extended_attention_mask(attention_mask = encoding['attention_mask'], 
                                                           input_shape = input_shape, 
@@ -239,7 +252,7 @@ def get_extended_attention_mask(attention_mask, input_shape, model, device):
     return extended_attention_mask
 
 def get_attention_probs(tot_embed, attention_mask, head_mask, sa_module):
-    mixed_query_layer = sa_module.query(tot_embed)
+    mixed_query_layer = sa_module.query(tot_embed) # these parentheses are the call to forward(), i think it's easiest to implement another wrapper class
 
     key_layer = transpose_for_scores(sa_module.key(tot_embed), sa_module)
 
@@ -355,7 +368,7 @@ def prop_encoder_from_level(rel, irrel, attention_mask, head_mask, encoder_modul
     return rel_enc, irrel_enc
 
 def prop_classifier_model_from_level(encoding, rel_ind_list, model, device, level = 0, att_list = None):
-    embedding_output = get_embeddings(encoding, model)
+    embedding_output = get_embeddings_bert(encoding, model)
     input_shape = encoding['input_ids'].size()
     extended_attention_mask = get_extended_attention_mask(attention_mask = encoding['attention_mask'], 
                                                           input_shape = input_shape, 

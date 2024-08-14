@@ -81,7 +81,7 @@ def prop_classifier_model_patched_baseline(encoding, model, patched_entries=[], 
     # rel_out: the contribution of the patched_entries
     # irrel_out: the contribution of everything else
     
-    embedding_output = get_embeddings(encoding, model.bert)
+    embedding_output = get_embeddings_bert(encoding, model.bert)
     input_shape = encoding['input_ids'].size()
     extended_attention_mask = get_extended_attention_mask(attention_mask = encoding['attention_mask'], 
                                                           input_shape = input_shape, 
