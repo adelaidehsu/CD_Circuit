@@ -3,6 +3,23 @@ from transformers.activations import NewGELUActivation
 from fancy_einsum import einsum
 import pdb
 
+'''
+These wrapper classes are used to make the GPT modules work with code intended for a HuggingFace
+BERT model. 
+'''
+class GPTValueMatrixWrapper():
+    def __init__(self, weight, bias):
+        # squeeze a dimension because TLens has its value matrix separate per attention head (num_heads, d_value, d_attn),
+        # but this code assumes a concatenated value matrix (d_value, d_model)
+        # transpose because TLens multiplies on the right, but this code assumes on the left
+        weight = weight.transpose(0, 1)
+        old_shape = weight.size()
+        new_shape = old_shape[:-2] + ((old_shape[-1] * old_shape[-2]),)
+        self.weight = (weight.reshape(new_shape)).T # due to the indexing conventions, this has to reallocate memory; this may slow things down significnatly
+        new_bias_shape = new_shape[:-1]
+        self.bias = bias.view(new_bias_shape)
+
+
 class GPTLayerNormWrapper():
     
     def __init__(self, ln_module):
@@ -24,17 +41,42 @@ class GPTLayerNormWrapper():
         return 1e-8
 
 # TODO: ensure that these conventions match the ones used by BERT on some level. We may be transposed, since TransformerLens multiplies on the right.
+# NOTE: Since we don't do decomposition of attention patterns, maybe this would have been better done by just replacing the entire attention pattern calculation with a method of this attention module. 
 class GPTAttentionWrapper():
     def __init__(self, attn_module):
         self.attn_module = attn_module
 
-    # TODO: einsum notation, once we are more sure about what the dimensions are
     def query(self, embedding):
-        pdb.set_trace()
         return einsum("batch query_pos d_model, n_heads d_model d_head -> batch query_pos n_heads d_head", embedding, self.attn_module.W_Q) + self.attn_module.b_Q
 
     def key(self, embedding):
-        return einsum("batch query_pos d_model, n_heads d_model d_head -> batch key_pos n_heads d_head", embedding, self.attn_module.W_K) + self.attn_module.b_K
+        return einsum("batch key_pos d_model, n_heads d_model d_head -> batch key_pos n_heads d_head", embedding, self.attn_module.W_K) + self.attn_module.b_K
+    
+    @property
+    def num_attention_heads(self):
+        return self.attn_module.cfg.n_heads
+    
+    @property
+    def attention_head_size(self):
+        return self.attn_module.cfg.d_head
+    
+    @property
+    def value(self):
+        return GPTValueMatrixWrapper(self.attn_module.W_V, self.attn_module.b_V)
+    
+    @property
+    def all_head_size(self):
+        return self.num_attention_heads * self.attention_head_size
+    
+
+'''
+Helper classes for readability.
+'''
+
+class OutputDecomposition:
+    def __init__(self, rel, irrel):
+        self.rel = rel
+        self.irrel = irrel
 
 def patch_context_hh(rel, irrel, source_node_list, target_nodes, level, sa_module, device):
     rel = reshape_for_patching(rel, sa_module)
@@ -114,9 +156,8 @@ def patch_context_hh_mean_ablated(rel, irrel, source_node_list, target_nodes, le
     return rel, irrel, target_decomps
 
 def prop_self_attention_hh(rel, irrel, attention_mask, 
-                           head_mask, source_node_list, target_nodes, 
-                           level, sa_module, device, att_probs = None, output_att_prob=False):
-    
+                           head_mask, sa_module, att_probs = None,
+                           output_att_prob=False):
     if att_probs is not None:
         att_probs = att_probs
     else:
@@ -141,11 +182,7 @@ def prop_attention_hh(rel, irrel, attention_mask,
     rel_context, irrel_context, returned_att_probs = prop_self_attention_hh(rel, irrel, 
                                                                         attention_mask, 
                                                                         head_mask, 
-                                                                        source_node_list,
-                                                                        target_nodes,
-                                                                        level,
                                                                         a_module.self,
-                                                                        device,
                                                                         att_probs,
                                                                         output_att_prob=output_att_prob)
     normalize_rel_irrel(rel_context, irrel_context)
@@ -208,7 +245,6 @@ def prop_BERT_layer_hh(rel, irrel, attention_mask, head_mask,
 def prop_GPT_layer_hh(rel, irrel, attention_mask, head_mask, 
                   source_node_list, target_nodes, level, layer_patched_values,
                   layer_module, device, att_probs = None, output_att_prob=False, mean_ablated=False):
-    
     # TODO: there should be some kind of casework for the folded layernorm,
     # if we want to perfectly apples-to-apples reproduce the IOI paper. 
     rel_ln, irrel_ln = prop_layer_norm(rel, irrel, GPTLayerNormWrapper(layer_module.ln1))
@@ -217,10 +253,9 @@ def prop_GPT_layer_hh(rel, irrel, attention_mask, head_mask,
     # since it's an encoder model. Since this is a decoder model, we only need the "self attention" function,
     # and also we have to do the second layer norm ourselves out here.
     rel_attn_residual, irrel_attn_residual, returned_att_probs = prop_self_attention_hh(rel_ln, irrel_ln, attention_mask, 
-                                                                           head_mask, source_node_list, 
-                                                                           target_nodes, level,
+                                                                           head_mask,
                                                                            GPTAttentionWrapper(layer_module.attn),
-                                                                           device,
+
                                                                            att_probs, output_att_prob)
     normalize_rel_irrel(rel_attn_residual, irrel_attn_residual)
     rel_attn, irrel_attn = rel + rel_attn_residual, irrel + irrel_attn_residual
@@ -309,9 +344,14 @@ def prop_BERT_hh(encoding, model, source_node_list, target_nodes, device,
     return out_decomps, target_decomps, att_probs_lst
 
 
-def prop_GPT_hh(encoding, model, source_node_list, target_nodes, device,
+# Single function which should perform the tasks of what is currently called prop_BERT_hh, prop_classifier_model_patched, and prop_classifier_model.
+# In order to get head-to-head contribution, pass in source and target nodes, and look at return val target_decomps.
+# In order to get source to logits contribution, pass in source nodes, and look at return val out_decomps.
+# In order to just get the output, well, I haven't written that.
+def prop_GPT(encoding, model, source_node_list, target_nodes, device,
                              patched_values=None, att_list = None, output_att_prob=False, mean_ablated=False):
-    embedding_output = get_embeddings_bert(encoding, model)
+    
+    embedding_output = model.embed(encoding.input_ids)
     input_shape = encoding['input_ids'].size()
 
     extended_attention_mask = get_extended_attention_mask(encoding['attention_mask'], 
@@ -363,7 +403,7 @@ def prop_GPT_hh(encoding, model, source_node_list, target_nodes, device,
         rel_vec = rel_out[i, :].detach().cpu().numpy()
         irrel_vec = irrel_out[i, :].detach().cpu().numpy()
         
-        out_decomps.append((rel_vec, irrel_vec))
+        out_decomps.append(OutputDecomposition(rel_vec, irrel_vec))
     
     return out_decomps, target_decomps, att_probs_lst
 
@@ -392,7 +432,7 @@ def prop_model_hh_batched(encoding, model, source_node_list, target_nodes, devic
                                                                             output_att_prob=output_att_prob,
                                                                             mean_ablated=mean_ablated)
         elif isinstance(model, transformer_lens.HookedTransformer):
-            layer_out_decomps, layer_target_decomps, att_probs_lst = prop_GPT_hh(encoding, model, 
+            layer_out_decomps, layer_target_decomps, att_probs_lst = prop_GPT(encoding, model, 
                                                                             source_node_list[b_st: b_end],
                                                                             target_nodes, device,
                                                                             patched_values,

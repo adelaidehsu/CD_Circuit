@@ -12,7 +12,7 @@ def reshape_post_patching(context_layer, sa_module):
 
 
 def prop_self_attention_patched(rel, irrel, attention_mask, 
-                                head_mask, patched_entries,
+                                head_mask,
                                 sa_module, att_probs = None, output_att_prob=False):
     
     if att_probs is not None:
@@ -76,7 +76,6 @@ def prop_attention_patched(rel, irrel, attention_mask,
     rel_context, irrel_context, returned_att_probs = prop_self_attention_patched(rel, irrel, 
                                                              attention_mask, 
                                                              head_mask, 
-                                                             patched_entries,
                                                              a_module.self, att_probs, output_att_prob)
     
     
@@ -180,11 +179,13 @@ def prop_classifier_model_patched(encoding, model, device, patched_entries=[], p
     input_shape = encoding['input_ids'].size()
     extended_attention_mask = get_extended_attention_mask(attention_mask = encoding['attention_mask'], 
                                                           input_shape = input_shape, 
-                                                          bert_model = model.bert,
+                                                          model = model.bert,
                                                           device = device)
     
     head_mask = [None] * model.bert.config.num_hidden_layers
     encoder_module = model.bert.encoder
+
+    att_probs_lst = []
     
     sh = list(embedding_output.shape)
     

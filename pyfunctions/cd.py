@@ -2,6 +2,7 @@ import numpy as np
 import warnings
 import torch
 import math
+import pdb
 from torch import nn
 import transformer_lens
 from transformers.modeling_utils import ModuleUtilsMixin
@@ -31,16 +32,12 @@ def get_encoding(text, tokenizer, device):
     return encoding
 
 def get_embeddings_bert(encoding, model):
-    # hack, just do hardcoded casework for attrs we know are there
-    if hasattr(model, "bert"):
-        embedding_output = model.bert.embeddings(
-                input_ids=encoding['input_ids'],
-                position_ids=None,
-                token_type_ids=encoding['token_type_ids'],
-                inputs_embeds=None,
-            )
-    if hasattr(model, "embed"): # TransformerLens HookedTransformer
-        embedding_output = model.embed(encoding.input_ids)
+    embedding_output = model.bert.embeddings(
+            input_ids=encoding['input_ids'],
+            position_ids=None,
+            token_type_ids=encoding['token_type_ids'],
+            inputs_embeds=None,
+        )
     return embedding_output
 
 def get_att_list(embedding_output, rel_pos, 
@@ -101,25 +98,24 @@ def prop_act(r, ir, act_mod):
     r_act = act_mod(r + ir) - ir_act
     return r_act, ir_act
 
-def prop_linear_core(rel, irrel, W, b):
+def prop_linear_core(rel, irrel, W, b, tol = 1e-8):
     rel_t = torch.matmul(rel, W)
     irrel_t = torch.matmul(irrel, W)    
-    
+
     exp_bias = b.expand_as(rel_t)
     tot_wt = torch.abs(rel_t) + torch.abs(irrel_t) + tol
     
     rel_bias = exp_bias * (torch.abs(rel_t) / tot_wt)
     irrel_bias = exp_bias * (torch.abs(irrel_t) / tot_wt)
     
-    tot_pred = rel_bias + rel_t + irrel_bias + irrel_t
+    # tot_pred = rel_bias + rel_t + irrel_bias + irrel_t
     
     return (rel_t + rel_bias), (irrel_t + irrel_bias)
 
-def prop_linear(rel, irrel, linear_module, tol = 1e-8):
+def prop_linear(rel, irrel, linear_module):
     return prop_linear_core(rel, irrel, linear_module.weight.T, linear_module.bias)
 
-# this function doesn't really need to exist, it's not like it saves any lines
-def prop_GPT_unembed(rel, irrel, unembed_module, tol = 1e-8):
+def prop_GPT_unembed(rel, irrel, unembed_module):
     return prop_linear_core(rel, irrel, unembed_module.W_U, unembed_module.b_U)
 
 
@@ -167,7 +163,7 @@ def prop_classifier_model(encoding, rel_ind_list, model, device, att_list = None
     input_shape = encoding['input_ids'].size()
     extended_attention_mask = get_extended_attention_mask(attention_mask = encoding['attention_mask'], 
                                                           input_shape = input_shape, 
-                                                          bert_model = model.bert,
+                                                          model = model.bert,
                                                          device=device)
     
     
@@ -197,8 +193,14 @@ def prop_classifier_model(encoding, rel_ind_list, model, device, att_list = None
 
 # propogate code for attention modules
 def transpose_for_scores(x, sa_module):
-    new_x_shape = x.size()[:-1] + (sa_module.num_attention_heads, sa_module.attention_head_size)
-    x = x.view(new_x_shape)
+    # handle different attention calculation conventions:
+    # if it's the "Standard" attention calculation, all the key and query matrices are concatenated,
+    # so the current dimension is [batch, sequence_idx, attention_heads * attn_dim]
+    # and we need to unroll it.
+    # however, some models do this automatically
+    if len(x.size()) == 3:
+        new_x_shape = x.size()[:-1] + (sa_module.num_attention_heads, sa_module.attention_head_size)
+        x = x.view(new_x_shape)
     return x.permute(0, 2, 1, 3)
 
 def mul_att(att_probs, value, sa_module):
@@ -331,9 +333,7 @@ def prop_layer(rel, irrel, attention_mask, head_mask, layer_module, att_probs = 
     irrel_tot = irrel_od + irrel_a
     
     rel_out, irrel_out = prop_layer_norm(rel_tot, irrel_tot, o_module.LayerNorm)
-    
-    # import pdb; pdb.set_trace()
-    
+        
     return rel_out, irrel_out
 
 def prop_encoder(rel, irrel, attention_mask, head_mask, encoder_module, att_list = None):
@@ -372,7 +372,7 @@ def prop_classifier_model_from_level(encoding, rel_ind_list, model, device, leve
     input_shape = encoding['input_ids'].size()
     extended_attention_mask = get_extended_attention_mask(attention_mask = encoding['attention_mask'], 
                                                           input_shape = input_shape, 
-                                                          bert_model = model.bert,
+                                                          model = model.bert,
                                                          device = device)
     
     head_mask = [None] * model.bert.config.num_hidden_layers
