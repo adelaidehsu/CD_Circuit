@@ -233,7 +233,7 @@ def prop_layer_patched(rel, irrel, attention_mask, head_mask, patched_entries, l
     return rel_out, irrel_out
 
 def prop_classifier_model_patched(encoding, model, patched_entries, att_list = None):
-    embedding_output = get_embeddings(encoding, model.bert)
+    embedding_output = get_embeddings_bert(encoding, model.bert)
     input_shape = encoding['input_ids'].size()
     extended_attention_mask = get_extended_attention_mask(attention_mask = encoding['attention_mask'], 
                                                           input_shape = input_shape, 
@@ -358,7 +358,7 @@ def prop_classifier_model_patched_dot_w_embed(encoding, model, patched_entries, 
     # rel_out: the contribution of the patched_entries
     # irrel_out: the contribution of everything else
     
-    embedding_output = get_embeddings(encoding, model.bert)
+    embedding_output = get_embeddings_bert(encoding, model.bert)
     input_shape = encoding['input_ids'].size()
     extended_attention_mask = get_extended_attention_mask(attention_mask = encoding['attention_mask'], 
                                                           input_shape = input_shape, 

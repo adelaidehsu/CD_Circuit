@@ -2,7 +2,10 @@ import numpy as np
 import warnings
 import torch
 import math
+import pdb
 from torch import nn
+import transformer_lens
+from transformers.modeling_utils import ModuleUtilsMixin
 
 # utility
 def normalize_rel_irrel(rel, irrel):
@@ -28,8 +31,8 @@ def get_encoding(text, tokenizer, device):
                                  return_tensors="pt").to(device)
     return encoding
 
-def get_embeddings(encoding, bert_model):
-    embedding_output = bert_model.embeddings(
+def get_embeddings_bert(encoding, model):
+    embedding_output = model.bert.embeddings(
             input_ids=encoding['input_ids'],
             position_ids=None,
             token_type_ids=encoding['token_type_ids'],
@@ -89,24 +92,32 @@ def prop_act(rel, irrel, act_module):
     return rel_act, irrel_act
 """
 
+# TODO: does this work correctly for all activations, or is this assuming GELU, or something else?
 def prop_act(r, ir, act_mod):
     ir_act = act_mod(ir)
     r_act = act_mod(r + ir) - ir_act
     return r_act, ir_act
 
-def prop_linear(rel, irrel, linear_module, tol = 1e-8):
-    rel_t = torch.matmul(rel, linear_module.weight.T)
-    irrel_t = torch.matmul(irrel, linear_module.weight.T)    
-    
-    exp_bias = linear_module.bias.expand_as(rel_t)
+def prop_linear_core(rel, irrel, W, b, tol = 1e-8):
+    rel_t = torch.matmul(rel, W)
+    irrel_t = torch.matmul(irrel, W)    
+
+    exp_bias = b.expand_as(rel_t)
     tot_wt = torch.abs(rel_t) + torch.abs(irrel_t) + tol
     
     rel_bias = exp_bias * (torch.abs(rel_t) / tot_wt)
     irrel_bias = exp_bias * (torch.abs(irrel_t) / tot_wt)
     
-    tot_pred = rel_bias + rel_t + irrel_bias + irrel_t
+    # tot_pred = rel_bias + rel_t + irrel_bias + irrel_t
     
     return (rel_t + rel_bias), (irrel_t + irrel_bias)
+
+def prop_linear(rel, irrel, linear_module):
+    return prop_linear_core(rel, irrel, linear_module.weight.T, linear_module.bias)
+
+def prop_GPT_unembed(rel, irrel, unembed_module):
+    return prop_linear_core(rel, irrel, unembed_module.W_U, unembed_module.b_U)
+
 
 def prop_layer_norm(rel, irrel, layer_norm_module, tol = 1e-8):
     tot = rel + irrel
@@ -118,7 +129,18 @@ def prop_layer_norm(rel, irrel, layer_norm_module, tol = 1e-8):
     rel_wt = torch.abs(rel)
     irrel_wt = torch.abs(irrel)
     tot_wt = rel_wt + irrel_wt + tol
-    
+    '''
+    # huge hack; instead can refactor function signature but i don't have the tools to do this without editing in at least 30 places
+    if hasattr(layer_norm_module, "eps"):
+        epsilon = layer_norm_module.eps
+        weight = layer_norm_module.weight
+        bias = layer_norm_module.bias
+    else:
+        epsilon = layer_norm_module.cfg.layer_norm_eps
+        weight = layer_norm_module.w
+        bias = layer_norm_module.b
+    '''
+
     rel_t = ((rel - rel_mn) / torch.sqrt(vr + layer_norm_module.eps)) * layer_norm_module.weight
     irrel_t = ((irrel - irrel_mn) / torch.sqrt(vr + layer_norm_module.eps)) * layer_norm_module.weight
     
@@ -137,15 +159,13 @@ def prop_pooler(rel, irrel, pooler_module):
     return rel_out, irrel_out
 
 def prop_classifier_model(encoding, rel_ind_list, model, device, att_list = None):
-    embedding_output = get_embeddings(encoding, model.bert)
+    embedding_output = get_embeddings_bert(encoding, model)
     input_shape = encoding['input_ids'].size()
     extended_attention_mask = get_extended_attention_mask(attention_mask = encoding['attention_mask'], 
                                                           input_shape = input_shape, 
-                                                          bert_model = model.bert,
+                                                          model = model.bert,
                                                          device=device)
     
-    # att_list = get_att_list(embedding_output, rel_pos, 
-    #                         extended_attention_mask, model.bert.encoder)
     
     tot_rel = len(rel_ind_list)
     sh = list(embedding_output.shape)
@@ -173,8 +193,14 @@ def prop_classifier_model(encoding, rel_ind_list, model, device, att_list = None
 
 # propogate code for attention modules
 def transpose_for_scores(x, sa_module):
-    new_x_shape = x.size()[:-1] + (sa_module.num_attention_heads, sa_module.attention_head_size)
-    x = x.view(new_x_shape)
+    # handle different attention calculation conventions:
+    # if it's the "Standard" attention calculation, all the key and query matrices are concatenated,
+    # so the current dimension is [batch, sequence_idx, attention_heads * attn_dim]
+    # and we need to unroll it.
+    # however, some models do this automatically
+    if len(x.size()) == 3:
+        new_x_shape = x.size()[:-1] + (sa_module.num_attention_heads, sa_module.attention_head_size)
+        x = x.view(new_x_shape)
     return x.permute(0, 2, 1, 3)
 
 def mul_att(att_probs, value, sa_module):
@@ -184,10 +210,15 @@ def mul_att(att_probs, value, sa_module):
     context_layer = context_layer.view(*new_context_layer_shape)
     return context_layer
 
-def get_extended_attention_mask(attention_mask, input_shape, bert_model, device):
-    dtype = bert_model.dtype
+def get_extended_attention_mask(attention_mask, input_shape, model, device):
+    dtype = next(model.parameters()).dtype
 
-    if not (attention_mask.dim() == 2 and bert_model.config.is_decoder):
+    is_decoder = False
+    if (hasattr(model, 'config') and model.config.is_decoder):
+        is_decoder = True
+    if isinstance(model, transformer_lens.HookedTransformer):
+        is_decoder = True # hack; just for GPT2 model
+    if not (attention_mask.dim() == 2 and is_decoder):
         # show warning only if it won't be shown in `create_extended_attention_mask_for_decoder`
         if device is not None:
             warnings.warn(
@@ -198,10 +229,11 @@ def get_extended_attention_mask(attention_mask, input_shape, bert_model, device)
     if attention_mask.dim() == 3:
         extended_attention_mask = attention_mask[:, None, :, :]
     elif attention_mask.dim() == 2:
+        
         # Provided a padding mask of dimensions [batch_size, seq_length]
         # - if the model is a decoder, apply a causal mask in addition to the padding mask
         # - if the model is an encoder, make the mask broadcastable to [batch_size, num_heads, seq_length, seq_length]
-        if bert_model.config.is_decoder:
+        if is_decoder:
             extended_attention_mask = ModuleUtilsMixin.create_extended_attention_mask_for_decoder(
                 input_shape, attention_mask, device
             )
@@ -222,7 +254,7 @@ def get_extended_attention_mask(attention_mask, input_shape, bert_model, device)
     return extended_attention_mask
 
 def get_attention_probs(tot_embed, attention_mask, head_mask, sa_module):
-    mixed_query_layer = sa_module.query(tot_embed)
+    mixed_query_layer = sa_module.query(tot_embed) # these parentheses are the call to forward(), i think it's easiest to implement another wrapper class
 
     key_layer = transpose_for_scores(sa_module.key(tot_embed), sa_module)
 
@@ -301,9 +333,7 @@ def prop_layer(rel, irrel, attention_mask, head_mask, layer_module, att_probs = 
     irrel_tot = irrel_od + irrel_a
     
     rel_out, irrel_out = prop_layer_norm(rel_tot, irrel_tot, o_module.LayerNorm)
-    
-    # import pdb; pdb.set_trace()
-    
+        
     return rel_out, irrel_out
 
 def prop_encoder(rel, irrel, attention_mask, head_mask, encoder_module, att_list = None):
@@ -338,11 +368,11 @@ def prop_encoder_from_level(rel, irrel, attention_mask, head_mask, encoder_modul
     return rel_enc, irrel_enc
 
 def prop_classifier_model_from_level(encoding, rel_ind_list, model, device, level = 0, att_list = None):
-    embedding_output = get_embeddings(encoding, model.bert)
+    embedding_output = get_embeddings_bert(encoding, model)
     input_shape = encoding['input_ids'].size()
     extended_attention_mask = get_extended_attention_mask(attention_mask = encoding['attention_mask'], 
                                                           input_shape = input_shape, 
-                                                          bert_model = model.bert,
+                                                          model = model.bert,
                                                          device = device)
     
     head_mask = [None] * model.bert.config.num_hidden_layers

@@ -1,4 +1,7 @@
 from pyfunctions.patch import *
+from transformers.activations import NewGELUActivation
+import pdb
+from pyfunctions.wrappers import GPTAttentionWrapper, GPTLayerNormWrapper, GPTValueMatrixWrapper, OutputDecomposition
 
 def patch_context_hh(rel, irrel, source_node_list, target_nodes, level, sa_module, device):
     rel = reshape_for_patching(rel, sa_module)
@@ -6,8 +9,8 @@ def patch_context_hh(rel, irrel, source_node_list, target_nodes, level, sa_modul
     
     target_nodes_at_level = [node for node in target_nodes if node[0] == level]
     target_decomps = []
-    
-    for s_ind, sn_list in enumerate(source_node_list):
+
+    for s_ind, entry in enumerate(source_node_list):
         out_shape = (len(target_nodes_at_level), sa_module.attention_head_size)
         
         rel_st = torch.zeros(out_shape, dtype = rel.dtype, device = device)
@@ -22,14 +25,13 @@ def patch_context_hh(rel, irrel, source_node_list, target_nodes, level, sa_modul
                 irrel_st[t_ind, :] = irrel[s_ind, t_pos, t_head, :]
         
         target_decomps.append((rel_st.detach().cpu().numpy(), irrel_st.detach().cpu().numpy()))
-        
-        for entry in sn_list:
-            if entry[0] == level:
-                pos = entry[1]
-                att_head = entry[2]
 
-                rel[s_ind, pos, att_head, :] = rel[s_ind, pos, att_head, :] + irrel[s_ind, pos, att_head, :]
-                irrel[s_ind, pos, att_head, :] = 0
+        if entry[0] == level:
+            pos = entry[1]
+            att_head = entry[2]
+
+            rel[s_ind, pos, att_head, :] = rel[s_ind, pos, att_head, :] + irrel[s_ind, pos, att_head, :]
+            irrel[s_ind, pos, att_head, :] = 0
 
     
     rel = reshape_post_patching(rel, sa_module)
@@ -78,9 +80,8 @@ def patch_context_hh_mean_ablated(rel, irrel, source_node_list, target_nodes, le
     return rel, irrel, target_decomps
 
 def prop_self_attention_hh(rel, irrel, attention_mask, 
-                           head_mask, source_node_list, target_nodes, 
-                           level, sa_module, device, att_probs = None, output_att_prob=False):
-    
+                           head_mask, sa_module, att_probs = None,
+                           output_att_prob=False):
     if att_probs is not None:
         att_probs = att_probs
     else:
@@ -105,11 +106,7 @@ def prop_attention_hh(rel, irrel, attention_mask,
     rel_context, irrel_context, returned_att_probs = prop_self_attention_hh(rel, irrel, 
                                                                         attention_mask, 
                                                                         head_mask, 
-                                                                        source_node_list,
-                                                                        target_nodes,
-                                                                        level,
                                                                         a_module.self,
-                                                                        device,
                                                                         att_probs,
                                                                         output_att_prob=output_att_prob)
     normalize_rel_irrel(rel_context, irrel_context)
@@ -124,7 +121,6 @@ def prop_attention_hh(rel, irrel, attention_mask,
     irrel_tot = irrel_dense + irrel
     
     normalize_rel_irrel(rel_tot, irrel_tot)
-    
     if not mean_ablated:
         rel_tot, irrel_tot, target_decomps = patch_context_hh(rel_tot, irrel_tot, source_node_list,
                                                               target_nodes, level, a_module.self, device)
@@ -139,7 +135,7 @@ def prop_attention_hh(rel, irrel, attention_mask,
     
     return rel_out, irrel_out, target_decomps, returned_att_probs
 
-def prop_layer_hh(rel, irrel, attention_mask, head_mask, 
+def prop_BERT_layer_hh(rel, irrel, attention_mask, head_mask, 
                   source_node_list, target_nodes, level, layer_patched_values,
                   layer_module, device, att_probs = None, output_att_prob=False, mean_ablated=False):
     
@@ -169,13 +165,49 @@ def prop_layer_hh(rel, irrel, attention_mask, head_mask,
     
     return rel_out, irrel_out, target_decomps, returned_att_probs
 
-def prop_classifier_model_hh(encoding, model, source_node_list, target_nodes, device,
+def prop_GPT_layer_hh(rel, irrel, attention_mask, head_mask, 
+                  source_node_list, target_nodes, level, layer_patched_values,
+                  layer_module, device, att_probs = None, output_att_prob=False, mean_ablated=False):
+    # TODO: there should be some kind of casework for the folded layernorm,
+    # if we want to perfectly apples-to-apples reproduce the IOI paper. 
+    rel_ln, irrel_ln = prop_layer_norm(rel, irrel, GPTLayerNormWrapper(layer_module.ln1))
+    attn_wrapper = GPTAttentionWrapper(layer_module.attn)
+    rel_summed_values, irrel_summed_values, returned_att_probs = prop_self_attention_hh(rel_ln, irrel_ln, attention_mask, 
+                                                                           head_mask,
+                                                                           attn_wrapper,
+
+                                                                           att_probs, output_att_prob)
+
+    rel_attn_residual, irrel_attn_residual = prop_linear(rel_summed_values, irrel_summed_values, attn_wrapper.output)
+    rel_mid, irrel_mid = rel + rel_attn_residual, irrel + irrel_attn_residual
+    rel_mid_norm, irrel_mid_norm = prop_layer_norm(rel_mid, irrel_mid, GPTLayerNormWrapper(layer_module.ln2))
+    
+
+    # MLP
+
+    rel_after_w_in, irrel_after_w_in = prop_linear_core(rel_mid_norm, irrel_mid_norm, layer_module.mlp.W_in, layer_module.mlp.b_in)
+    normalize_rel_irrel(rel_after_w_in, irrel_after_w_in)
+    
+    # since GELU activation is stateless, it's not an attribute of the layer module
+    rel_act, irrel_act = prop_act(rel_after_w_in, irrel_after_w_in, NewGELUActivation())     
+    rel_mlp_residual, irrel_mlp_residual = prop_linear_core(rel_act, irrel_act, layer_module.mlp.W_out, layer_module.mlp.b_out)
+    normalize_rel_irrel(rel_mlp_residual, irrel_mlp_residual)
+    rel_out, irrel_out = rel_mid + rel_mlp_residual, irrel_mid + irrel_mlp_residual
+    normalize_rel_irrel(rel_out, irrel_out)
+
+    target_decomps = None #TODO, has to do with the output of the patch_context_hh function.
+
+    # there is not a layernorm at the end of this block, unlike in BERT    
+
+    return rel_out, irrel_out, target_decomps, returned_att_probs
+
+def prop_BERT_hh(encoding, model, source_node_list, target_nodes, device,
                              patched_values=None, att_list = None, output_att_prob=False, mean_ablated=False):
-    embedding_output = get_embeddings(encoding, model.bert)
+    embedding_output = get_embeddings_bert(encoding, model)
     input_shape = encoding['input_ids'].size()
     extended_attention_mask = get_extended_attention_mask(attention_mask = encoding['attention_mask'], 
                                                           input_shape = input_shape, 
-                                                          bert_model = model.bert,
+                                                          model = model,
                                                           device = device)
     
     head_mask = [None] * model.bert.config.num_hidden_layers
@@ -200,7 +232,7 @@ def prop_classifier_model_hh(encoding, model, source_node_list, target_nodes, de
         else:
             layer_patched_values = None
             
-        rel_n, irrel_n, layer_target_decomps, returned_att_probs = prop_layer_hh(rel, irrel, extended_attention_mask, 
+        rel_n, irrel_n, layer_target_decomps, returned_att_probs = prop_BERT_layer_hh(rel, irrel, extended_attention_mask, 
                                                                                  layer_head_mask, source_node_list, 
                                                                                  target_nodes, i, 
                                                                                  layer_patched_values,
@@ -228,7 +260,71 @@ def prop_classifier_model_hh(encoding, model, source_node_list, target_nodes, de
     
     return out_decomps, target_decomps, att_probs_lst
 
-def prop_classifier_model_hh_batched(encoding, model, source_node_list, target_nodes, device,
+
+# Single function, analogous to prop_BERT_hh, which should perform the tasks
+#  of what is currently called prop_BERT_hh, prop_classifier_model_patched, and prop_classifier_model.
+# In order to get head-to-head contribution, pass in source and target nodes, and look at return val target_decomps.
+# In order to get source to logits contribution, pass in source nodes, and look at return val out_decomps.
+def prop_GPT(encoding, model, source_node_list, target_nodes, device,
+                             patched_values=None, att_list = None, output_att_prob=False, mean_ablated=False):
+    
+    embedding_output = model.embed(encoding.input_ids) + model.pos_embed(encoding.input_ids) # TODO: refactor so that this function just takes the embedding. why is the encoding important/why is this thing called the encoding?
+    input_shape = encoding['input_ids'].size()
+
+    extended_attention_mask = get_extended_attention_mask(encoding['attention_mask'], 
+                                                          input_shape, 
+                                                          model,
+                                                          device)
+    
+    head_mask = [None] * len(model.blocks)
+    
+    sh = list(embedding_output.shape)
+    sh[0] = len(source_node_list)
+    
+    rel = torch.zeros(sh, dtype = embedding_output.dtype, device = device)
+    irrel = torch.zeros(sh, dtype = embedding_output.dtype, device = device)
+    
+    irrel[:] = embedding_output[:]
+    
+    target_decomps = []
+    att_probs_lst = []
+    for i, layer_module in enumerate(model.blocks):
+        layer_head_mask = head_mask[i]
+        att_probs = None
+        
+        if patched_values is not None:
+            layer_patched_values = patched_values[i] #[512, 12, 64]
+        else:
+            layer_patched_values = None
+            
+        rel, irrel, layer_target_decomps, returned_att_probs = prop_GPT_layer_hh(rel, irrel, extended_attention_mask, 
+                                                                                 layer_head_mask, source_node_list, 
+                                                                                 target_nodes, i, 
+                                                                                 layer_patched_values,
+                                                                                 layer_module, 
+                                                                                 device,
+                                                                                 att_probs, output_att_prob,
+                                                                                 mean_ablated=mean_ablated)
+        target_decomps.append(layer_target_decomps)
+        
+        if output_att_prob:
+            att_probs_lst.append(returned_att_probs.squeeze(0))
+    rel, irrel = prop_layer_norm(rel, irrel, GPTLayerNormWrapper(model.ln_final))
+    rel_out, irrel_out = prop_GPT_unembed(rel, irrel, model.unembed)
+    
+    out_decomps = []
+
+    for i, sn_list in enumerate(source_node_list):
+        rel_vec = rel_out[i, :].detach().cpu().numpy()
+        irrel_vec = irrel_out[i, :].detach().cpu().numpy()
+        
+        out_decomps.append(OutputDecomposition(rel_vec, irrel_vec))
+    
+    return out_decomps, target_decomps, att_probs_lst
+
+import transformers # hack, just so the isinstance works
+import transformer_lens
+def prop_model_hh_batched(encoding, model, source_node_list, target_nodes, device,
                                      patched_values=None, 
                                      num_at_time = 64, n_layers = 12, att_list = None, output_att_prob=False,
                                      mean_ablated=False):
@@ -242,14 +338,24 @@ def prop_classifier_model_hh_batched(encoding, model, source_node_list, target_n
     for b_no in range(n_batches):
         b_st = b_no * num_at_time
         b_end = min(b_st + num_at_time, n_source_lists)
-        layer_out_decomps, layer_target_decomps, att_probs_lst = prop_classifier_model_hh(encoding, model, 
-                                                                           source_node_list[b_st: b_end],
-                                                                           target_nodes, device,
-                                                                           patched_values,
-                                                                           att_list=att_list,
-                                                                           output_att_prob=output_att_prob,
-                                                                           mean_ablated=mean_ablated)
-        out_decomps = out_decomps + layer_out_decomps
-        target_decomps = [target_decomps[i] + layer_target_decomps[i] for i in range(n_layers)]
+        if isinstance(model, transformers.models.bert.modeling_bert.BertForSequenceClassification):
+            batch_out_decomps, batch_target_decomps, att_probs_lst = prop_BERT_hh(encoding, model, 
+                                                                            source_node_list[b_st: b_end],
+                                                                            target_nodes, device,
+                                                                            patched_values,
+                                                                            att_list=att_list,
+                                                                            output_att_prob=output_att_prob,
+                                                                            mean_ablated=mean_ablated)
+        elif isinstance(model, transformer_lens.HookedTransformer):
+            batch_out_decomps, batch_target_decomps, att_probs_lst = prop_GPT(encoding, model, 
+                                                                            source_node_list[b_st: b_end],
+                                                                            target_nodes, device,
+                                                                            patched_values,
+                                                                            att_list=att_list,
+                                                                            output_att_prob=output_att_prob,
+                                                                            mean_ablated=mean_ablated)
+
+        out_decomps = out_decomps + batch_out_decomps
+        target_decomps = [target_decomps[i] + batch_target_decomps[i] for i in range(n_layers)]
     
     return out_decomps, target_decomps
