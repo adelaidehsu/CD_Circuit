@@ -1,4 +1,4 @@
-from pyfunctions.cd import *
+from pyfunctions.cdt_basic import *
 
 def reshape_for_patching(context_layer, sa_module):
     new_shape = context_layer.size()[:-1] + (sa_module.num_attention_heads, sa_module.attention_head_size)
@@ -173,7 +173,7 @@ def prop_classifier_model_patched(encoding, model, device, patched_entries=[], p
     # patched_entries: attention heads to patch. format: [(level, pos, head)]
     # level: 0-11, pos: 0-511, head: 0-11
     # rel_out: the contribution of the patched_entries
-    # irrel_out: the contribution of everything else
+    # irrel_out: the contribution of everything else``
     
     embedding_output = get_embeddings_bert(encoding, model)
     input_shape = encoding['input_ids'].size()

@@ -1,3 +1,11 @@
+'''
+Copied verbatim from the EasyTransformer repo, which is the one most clearly associated with the IOI paper.
+It seems that the version associated with the ARENA material is more recent than this one, somehow,
+because some of the TODOs have been resolved.
+This version should be good enough for our purposes, and the differences should have minimal effect.
+'''
+
+
 import io
 from logging import warning
 from typing import Union, List

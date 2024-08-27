@@ -51,10 +51,7 @@ class GPTOutputMatrixWrapper():
         self.bias = bias.view(new_bias_shape)
 
 
-
-
-# TODO: ensure that these conventions match the ones used by BERT on some level. We may be transposed, since TransformerLens multiplies on the right.
-# NOTE: Since we don't do decomposition of attention patterns, maybe this would have been better done by just replacing the entire attention pattern calculation with a method of this attention module. 
+# NOTE: Since we don't do decomposition of attention patterns, maybe this would have been better done by just replacing the entire attention pattern calculation with a method of this attention module. Oh well, we've already verified that this works correctly.
 class GPTAttentionWrapper():
     def __init__(self, attn_module):
         self.attn_module = attn_module
