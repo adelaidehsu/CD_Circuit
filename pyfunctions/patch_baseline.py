@@ -1,8 +1,8 @@
 from pyfunctions.patch import *
 
 def patch_context_baseline(rel, irrel, patched_entries, layer_patched_values, sa_module):
-    rel = reshape_for_patching(rel, sa_module)
-    irrel = reshape_for_patching(irrel, sa_module)
+    rel = reshape_separate_attention_heads(rel, sa_module)
+    irrel = reshape_separate_attention_heads(irrel, sa_module)
     
     if layer_patched_values is not None:
         layer_patched_values = layer_patched_values[None, :, :, :]
@@ -14,8 +14,8 @@ def patch_context_baseline(rel, irrel, patched_entries, layer_patched_values, sa
         rel[:, pos, att_head, :] = 0
         irrel[:, pos, att_head, :] = torch.Tensor(layer_patched_values[:, pos, att_head, :]) #substitute with mean response
     
-    rel = reshape_post_patching(rel, sa_module)
-    irrel = reshape_post_patching(irrel, sa_module)
+    rel = reshape_concatenate_attention_heads(rel, sa_module)
+    irrel = reshape_concatenate_attention_heads(irrel, sa_module)
     return rel, irrel
 
 def prop_attention_patched_baseline(rel, irrel, attention_mask, 
@@ -39,8 +39,8 @@ def prop_attention_patched_baseline(rel, irrel, attention_mask,
     
     if output_context:
         # for collecting mean head response
-        my_rel_context = reshape_for_patching(rel_tot, a_module.self)
-        my_irrel_context = reshape_for_patching(irrel_tot, a_module.self)
+        my_rel_context = reshape_separate_attention_heads(rel_tot, a_module.self)
+        my_irrel_context = reshape_separate_attention_heads(irrel_tot, a_module.self)
         context = {'rel': my_rel_context, 'irrel': my_irrel_context}
         ##
     else:
