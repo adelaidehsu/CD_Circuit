@@ -271,6 +271,7 @@ def get_extended_attention_mask(attention_mask, input_shape, model, device):
     extended_attention_mask = (1.0 - extended_attention_mask) * torch.finfo(dtype).min
     return extended_attention_mask
 
+
 def get_attention_probs(tot_embed, attention_mask, head_mask, sa_module):
     mixed_query_layer = sa_module.query(tot_embed) # these parentheses are the call to forward(), i think it's easiest to implement another wrapper class
 
