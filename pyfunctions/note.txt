@@ -157,8 +157,8 @@ def prop_layer_norm(rel, irrel, layer_norm_module, tol = 1e-8):
 
 '''
 def patch_context(rel, irrel, patched_entries, sa_module):
-    rel = reshape_for_patching(rel, sa_module)
-    irrel = reshape_for_patching(irrel, sa_module)
+    rel = reshape_separate_attention_heads(rel, sa_module)
+    irrel = reshape_separate_attention_heads(irrel, sa_module)
     
     for entry in patched_entries:
         pos = entry[1]
@@ -168,8 +168,8 @@ def patch_context(rel, irrel, patched_entries, sa_module):
         irrel[:, pos, att_head, :] = 0
 
     
-    rel = reshape_post_patching(rel, sa_module)
-    irrel = reshape_post_patching(irrel, sa_module)
+    rel = reshape_concatenate_attention_heads(rel, sa_module)
+    irrel = reshape_concatenate_attention_heads(irrel, sa_module)
     
     return rel, irrel
 
@@ -269,8 +269,8 @@ def prop_classifier_model_patched(encoding, model, patched_entries, att_list = N
 # Appendix
 '''
 def patch_context_dot_w_embed(embed, rel, irrel, patched_entries, sa_module):
-    rel = reshape_for_patching(rel, sa_module)
-    irrel = reshape_for_patching(irrel, sa_module)
+    rel = reshape_separate_attention_heads(rel, sa_module)
+    irrel = reshape_separate_attention_heads(irrel, sa_module)
     
     for entry in patched_entries:
         pos = entry[1]
@@ -283,8 +283,8 @@ def patch_context_dot_w_embed(embed, rel, irrel, patched_entries, sa_module):
 
         
     
-    rel = reshape_post_patching(rel, sa_module)
-    irrel = reshape_post_patching(irrel, sa_module)
+    rel = reshape_concatenate_attention_heads(rel, sa_module)
+    irrel = reshape_concatenate_attention_heads(irrel, sa_module)
     
     return rel, irrel
 

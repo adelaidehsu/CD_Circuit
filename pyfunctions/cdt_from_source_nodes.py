@@ -1,15 +1,14 @@
-from pyfunctions.cd import *
+from pyfunctions.cdt_basic import *
 
-def reshape_for_patching(context_layer, sa_module):
+def reshape_separate_attention_heads(context_layer, sa_module):
     new_shape = context_layer.size()[:-1] + (sa_module.num_attention_heads, sa_module.attention_head_size)
     context_layer = context_layer.view(new_shape)
     return context_layer
 
-def reshape_post_patching(context_layer, sa_module):
+def reshape_concatenate_attention_heads(context_layer, sa_module):
     new_shape = context_layer.size()[:-2] + (sa_module.all_head_size,)
     context_layer = context_layer.view(*new_shape)
     return context_layer
-
 
 def prop_self_attention_patched(rel, irrel, attention_mask, 
                                 head_mask,
@@ -29,48 +28,43 @@ def prop_self_attention_patched(rel, irrel, attention_mask,
         return rel_context, irrel_context, att_probs
     else:
         return rel_context, irrel_context, None
-    
-def patch_context(rel, irrel, patched_entries, sa_module):
-    rel = reshape_for_patching(rel, sa_module)
-    irrel = reshape_for_patching(irrel, sa_module)
-        
-    for entry in patched_entries:
-        pos = entry[1]
-        att_head = entry[2]
 
-        rel[:, pos, att_head, :] = irrel[:, pos, att_head, :] + rel[:, pos, att_head, :]
-        irrel[:, pos, att_head, :] = 0
-    
-    rel = reshape_post_patching(rel, sa_module)
-    irrel = reshape_post_patching(irrel, sa_module)
-    return rel, irrel
 
-def patch_context_mean_ablated(rel, irrel, patched_entries, layer_patched_values, sa_module, device):
-    rel = reshape_for_patching(rel, sa_module)
-    irrel = reshape_for_patching(irrel, sa_module)
+def set_rel_at_source_nodes(rel, irrel, source_nodes, layer_mean_acts, sa_module, set_irrel_to_mean, device):
+    if set_irrel_to_mean and layer_mean_acts is None:
+        print("Tried to set decomposition of source node using mean method but no mean activation tensor provided; returning immediately \
+               (likely the resuling decomposition will be meaningless)")
+    rel = reshape_separate_attention_heads(rel, sa_module)
+    irrel = reshape_separate_attention_heads(irrel, sa_module)
+    layer_mean_acts = reshape_separate_attention_heads(layer_mean_acts, sa_module)
     
-    if layer_patched_values is not None:
-        layer_patched_values = layer_patched_values[None, :, :, :]
+    if layer_mean_acts is not None:
+        layer_mean_acts = layer_mean_acts[None, :, :, :]
         
-    for entry in patched_entries:
+    for entry in source_nodes:
         pos = entry[1]
         att_head = entry[2]
         
-        rel[:, pos, att_head, :] = irrel[:, pos, att_head, :] + rel[:, pos, att_head, :] - torch.Tensor(layer_patched_values[:, pos, att_head, :]).to(device)
-        irrel[:, pos, att_head, :] = torch.Tensor(layer_patched_values[:, pos, att_head, :]).to(device)
+        if set_irrel_to_mean:
+            rel[:, pos, att_head, :] = irrel[:, pos, att_head, :] + rel[:, pos, att_head, :] - torch.Tensor(layer_mean_acts[:, pos, att_head, :]).to(device)
+            irrel[:, pos, att_head, :] = torch.Tensor(layer_mean_acts[:, pos, att_head, :]).to(device)
+        else:
+            rel[:, pos, att_head, :] = irrel[:, pos, att_head, :] + rel[:, pos, att_head, :]
+            irrel[:, pos, att_head, :] = 0
+
     
-    rel = reshape_post_patching(rel, sa_module)
-    irrel = reshape_post_patching(irrel, sa_module)
+    rel = reshape_concatenate_attention_heads(rel, sa_module)
+    irrel = reshape_concatenate_attention_heads(irrel, sa_module)
     
     return rel, irrel
 
 def prop_attention_patched(rel, irrel, attention_mask, 
-                           head_mask, patched_entries, layer_patched_values, a_module,
+                           head_mask, source_nodes, layer_mean_acts, a_module,
                            device,
                            att_probs=None,
                            output_att_prob=False,
                            output_context=False,
-                           mean_ablated=False):
+                           set_irrel_to_mean=False):
     
     
     rel_context, irrel_context, returned_att_probs = prop_self_attention_patched(rel, irrel, 
@@ -82,7 +76,7 @@ def prop_attention_patched(rel, irrel, attention_mask,
     if output_context:
         # for head output variance analysis
         context = rel_context + irrel_context
-        context = reshape_for_patching(context, a_module.self)
+        context = reshape_separate_attention_heads(context, a_module.self)
         ##
     else:
         context = None
@@ -102,11 +96,8 @@ def prop_attention_patched(rel, irrel, attention_mask,
     
     normalize_rel_irrel(rel_tot, irrel_tot)
     
-    # patch the head
-    if not mean_ablated:
-        rel_tot, irrel_tot = patch_context(rel_tot, irrel_tot, patched_entries, a_module.self)
-    else:
-        rel_tot, irrel_tot = patch_context_mean_ablated(rel_tot, irrel_tot, patched_entries, layer_patched_values, a_module.self, device)
+    # now that we've calculated the output of the attention mechanism, set desired inputs to "relevant"
+    rel_tot, irrel_tot = set_rel_at_source_nodes(rel_tot, irrel_tot, source_nodes, layer_mean_acts, a_module.self, set_irrel_to_mean, device)
     
     normalize_rel_irrel(rel_tot, irrel_tot)
     
@@ -117,17 +108,17 @@ def prop_attention_patched(rel, irrel, attention_mask,
     return rel_out, irrel_out, returned_att_probs, context
 
 
-def prop_layer_patched(rel, irrel, attention_mask, head_mask, patched_entries, layer_patched_values, 
+def prop_layer_patched(rel, irrel, attention_mask, head_mask, source_nodes, layer_mean_acts, 
                        layer_module, device, att_probs = None, output_att_prob=False, output_context=False,
-                       mean_ablated=False):
+                       set_irrel_to_mean=False):
     
     # attn module
     rel_a, irrel_a, returned_att_probs, context = prop_attention_patched(rel, irrel, attention_mask, head_mask,
-                                                                         patched_entries, layer_patched_values,
+                                                                         source_nodes, layer_mean_acts,
                                                                          layer_module.attention, device,
                                                                          att_probs,
                                                                          output_att_prob, output_context,
-                                                                         mean_ablated=mean_ablated)
+                                                                         set_irrel_to_mean=set_irrel_to_mean)
     # linear (dense)
     i_module = layer_module.intermediate
     rel_id, irrel_id = prop_linear(rel_a, irrel_a, i_module.dense)
@@ -167,13 +158,13 @@ def prop_encoder_patched(rel, irrel, attention_mask, head_mask, encoder_module, 
     
     return rel_enc, irrel_enc
 
-def prop_classifier_model_patched(encoding, model, device, patched_entries=[], patched_values=None, 
+def prop_classifier_model_patched(encoding, model, device, source_nodes=[], mean_acts=None, 
                                   att_list = None, output_att_prob=False, output_context=False,
-                                  mean_ablated=False):
-    # patched_entries: attention heads to patch. format: [(level, pos, head)]
+                                  set_irrel_to_mean=False):
+    # source_nodes: attention heads to patch. format: [(level, pos, head)]
     # level: 0-11, pos: 0-511, head: 0-11
-    # rel_out: the contribution of the patched_entries
-    # irrel_out: the contribution of everything else
+    # rel_out: the contribution of the source_nodes
+    # irrel_out: the contribution of everything else``
     
     embedding_output = get_embeddings_bert(encoding, model)
     input_shape = encoding['input_ids'].size()
@@ -197,21 +188,21 @@ def prop_classifier_model_patched(encoding, model, device, patched_entries=[], p
     att_probs_lst = []
     context_lst = []
     for i, layer_module in enumerate(encoder_module.layer):
-        layer_patched_entries = [p_entry for p_entry in patched_entries if p_entry[0] == i]
+        layer_source_nodes = [p_entry for p_entry in source_nodes if p_entry[0] == i]
         layer_head_mask = head_mask[i]
         att_probs = None
         
-        if patched_values is not None:
-            layer_patched_values = patched_values[i]
+        if mean_acts is not None:
+            layer_mean_acts = mean_acts[i]
         else:
-            layer_patched_values = None
+            layer_mean_acts = None
             
         rel_n, irrel_n, returned_att_probs, context = prop_layer_patched(rel, irrel, extended_attention_mask,
-                                                                layer_head_mask, layer_patched_entries,
-                                                                layer_patched_values,
+                                                                layer_head_mask, layer_source_nodes,
+                                                                layer_mean_acts,
                                                                 layer_module, device, att_probs, output_att_prob,
                                                                 output_context,
-                                                                mean_ablated=mean_ablated)
+                                                                set_irrel_to_mean=set_irrel_to_mean)
         normalize_rel_irrel(rel_n, irrel_n)
         rel, irrel = rel_n, irrel_n
         
