@@ -79,7 +79,7 @@ def prop_BERT_attention_hh(rel, irrel, attention_mask,
 
     # now that we've calculated the output of the attention mechanism, set desired inputs to "relevant"
     rel_tot, irrel_tot = set_rel_at_source_nodes(rel_tot, irrel_tot, source_node_list, layer_mean_acts, a_module.self, set_irrel_to_mean, device)
-    rel_tot, irrel_tot, target_decomps = calculate_contributions(rel_tot, irrel_tot, source_node_list,
+    target_decomps = calculate_contributions(rel_tot, irrel_tot, source_node_list,
                                                                            target_nodes, level,
                                                                            a_module.self, device=device)
     
@@ -158,10 +158,15 @@ def prop_GPT_layer_hh(rel, irrel, attention_mask, head_mask,
 
     return rel_out, irrel_out, layer_target_decomps, returned_att_probs
 
-def prop_BERT_hh(encoding_idxs, extended_attention_mask, model, source_node_list, target_nodes, device,
-                             mean_acts=None, att_list = None, output_att_prob=False, set_irrel_to_mean=False):
-    embedding_output = get_embeddings_bert(encoding_idxs, model)
+def prop_BERT_hh(encoding, model, source_node_list, target_nodes, device,
+                             mean_acts=None, output_att_prob=False, set_irrel_to_mean=False):
+    embedding_output = get_embeddings_bert(encoding, model)
     
+    input_shape = encoding['input_ids'].size()
+    extended_attention_mask = get_extended_attention_mask(encoding.attention_mask, 
+                                                            input_shape, 
+                                                            model,
+                                                            device)
     
     head_mask = [None] * model.bert.config.num_hidden_layers
     encoder_module = model.bert.encoder
@@ -271,12 +276,11 @@ def prop_GPT(encoding_idxs, extended_attention_mask, model, source_node_list, ta
     return out_decomps, target_decomps, att_probs_lst
 
 '''
-encoding, model, source_node_list, target_nodes, device,
-                                     mean_acts=None, 
-                                     num_at_time = 64, n_layers = 12, att_list = None, output_att_prob=False,
-                                     set_irrel_to_mean=False
+This is different from running a model on a batch of input data.
+Instead it calculates the decomposition relative to many source nodes at the same time.
 '''
-def prop_model_hh_batched(prop_model_fn, source_node_list, num_at_time=64, n_layers=12):
+
+def batch_run(prop_model_fn, source_node_list, num_at_time=64, n_layers=12):
     
     out_decomps = []
     target_decomps = [[] for i in range(n_layers)]

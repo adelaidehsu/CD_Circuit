@@ -92,3 +92,10 @@ class OutputDecomposition:
     def __init__(self, rel, irrel):
         self.rel = rel
         self.irrel = irrel
+
+class TargetDecomposition:
+    def __init__(self, rel, irrel):
+        self.rel = rel
+        self.irrel = irrel        
+
+class

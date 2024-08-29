@@ -36,10 +36,10 @@ def set_rel_at_source_nodes(rel, irrel, source_nodes, layer_mean_acts, sa_module
                (likely the resuling decomposition will be meaningless)")
     rel = reshape_separate_attention_heads(rel, sa_module)
     irrel = reshape_separate_attention_heads(irrel, sa_module)
-    layer_mean_acts = reshape_separate_attention_heads(layer_mean_acts, sa_module)
     
     if layer_mean_acts is not None:
-        layer_mean_acts = layer_mean_acts[None, :, :, :]
+        layer_mean_acts = reshape_separate_attention_heads(layer_mean_acts, sa_module)
+        layer_mean_acts = layer_mean_acts[None, :, :, :] # add on a batch dimension
         
     for entry in source_nodes:
         pos = entry[1]
