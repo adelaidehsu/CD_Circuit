@@ -104,9 +104,7 @@ def prop_BERT_attention_hh(rel, irrel, attention_mask,
     #print((rel_tot+irrel_tot).all() == tmp.all()) #passed
 
     # now that we've calculated the output of the attention mechanism, set desired inputs to "relevant"
-    #tmp = rel_tot + irrel_tot
-    rel_tot, irrel_tot = set_rel_at_source_nodes(rel_tot, irrel_tot, source_node_list, layer_mean_acts, a_module.self, set_irrel_to_mean, device)
-    #print((rel_tot+irrel_tot).all() == tmp.all()) #passed
+    rel_tot, irrel_tot = set_rel_at_source_nodes(rel_tot, irrel_tot, source_node_list, layer_mean_acts, level, a_module.self, set_irrel_to_mean, device)
     target_decomps = calculate_contributions(rel_tot, irrel_tot, source_node_list,
                                                                            target_nodes, level,
                                                                            a_module.self, device=device)
@@ -170,10 +168,11 @@ def prop_GPT_layer_hh(rel, irrel, attention_mask, head_mask,
 
     rel_attn_residual, irrel_attn_residual = prop_linear(rel_summed_values, irrel_summed_values, attn_wrapper.output)
     # now that we've calculated the output of the attention mechanism, set desired inputs to "relevant"
-    rel_attn_residual, irrel_attn_residual = set_rel_at_source_nodes(rel_attn_residual, irrel_attn_residual, source_node_dict, layer_mean_acts, attn_wrapper, set_irrel_to_mean, device)
+    rel_attn_residual, irrel_attn_residual = set_rel_at_source_nodes(rel_attn_residual, irrel_attn_residual, source_node_dict, layer_mean_acts, level, attn_wrapper, set_irrel_to_mean, device)
     layer_target_decomps = calculate_contributions_new(rel_attn_residual, irrel_attn_residual, source_node_dict,
                                                                            target_nodes, level,
                                                                            attn_wrapper, device=device)
+    layer_target_decomps = None
     rel_mid, irrel_mid = rel + rel_attn_residual, irrel + irrel_attn_residual
     rel_mid_norm, irrel_mid_norm = prop_layer_norm(rel_mid, irrel_mid, GPTLayerNormWrapper(layer_module.ln2))
     
@@ -305,18 +304,20 @@ def prop_GPT(encoding_idxs, extended_attention_mask, model, source_node_list, ta
     start_batch_idx = 0
     for source_node in source_node_list:
         source_node_dict[source_node] = list(range(start_batch_idx, start_batch_idx + actual_batch_size))
+        start_batch_idx += actual_batch_size
 
     irrel = embedding_output.repeat(len(source_node_list), 1, 1)
     rel = torch.zeros(irrel.size(), dtype = embedding_output.dtype, device = device)
     
     target_decomps = []
     att_probs_lst = []
+    # print(irrel)
     for i, layer_module in enumerate(model.blocks):
         layer_head_mask = head_mask[i]
         att_probs = None
         
         if mean_acts is not None:
-            layer_mean_acts = mean_acts[i] #[512, 12, 64]
+            layer_mean_acts = mean_acts[i]
         else:
             layer_mean_acts = None
             
@@ -328,10 +329,13 @@ def prop_GPT(encoding_idxs, extended_attention_mask, model, source_node_list, ta
                                                                                  device,
                                                                                  att_probs, output_att_prob,
                                                                                  set_irrel_to_mean=set_irrel_to_mean)
+
         target_decomps.append(layer_target_decomps)
         
         if output_att_prob:
             att_probs_lst.append(returned_att_probs.squeeze(0))
+    # print(source_node_dict)
+    # print(rel.shape)
     rel, irrel = prop_layer_norm(rel, irrel, GPTLayerNormWrapper(model.ln_final))
     rel_out, irrel_out = prop_GPT_unembed(rel, irrel, model.unembed)
     
@@ -364,6 +368,6 @@ def batch_run(prop_model_fn, source_node_list, num_at_time=64, n_layers=12):
         batch_out_decomps, batch_target_decomps, _, _ = prop_model_fn(source_node_list[b_st: b_end])
 
         out_decomps = out_decomps + batch_out_decomps
-        target_decomps = [target_decomps[i] + batch_target_decomps[i] for i in range(n_layers)]
+        target_decomps = None #[target_decomps[i] + batch_target_decomps[i] for i in range(3)]
     
     return out_decomps, target_decomps

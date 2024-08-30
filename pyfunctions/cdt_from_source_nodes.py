@@ -30,21 +30,24 @@ def prop_self_attention_patched(rel, irrel, attention_mask,
         return rel_context, irrel_context, None
 
 
-def set_rel_at_source_nodes(rel, irrel, source_nodes, layer_mean_acts, sa_module, set_irrel_to_mean, device):
+def set_rel_at_source_nodes(rel, irrel, source_nodes, layer_mean_acts, layer_idx, sa_module, set_irrel_to_mean, device):
 
     if set_irrel_to_mean and layer_mean_acts is None:
         print("Tried to set decomposition of source node using mean method but no mean activation tensor provided; returning immediately \
-               (likely the resuling decomposition will be meaningless)")
+               (likely the resulting decomposition will be meaningless)")
     rel = reshape_separate_attention_heads(rel, sa_module)
     irrel = reshape_separate_attention_heads(irrel, sa_module)
     
     if layer_mean_acts is not None:
         layer_mean_acts = reshape_separate_attention_heads(layer_mean_acts, sa_module)
         layer_mean_acts = layer_mean_acts[None, :, :, :] # add on a batch dimension
-        
+    
     # temporary, for transitioning from list of source nodes to dict which maps source nodes to batch indices
     if isinstance(source_nodes, dict):
         for source_node, batch_indices in source_nodes.items():
+            source_node_layer_idx = source_node[0]
+            if source_node_layer_idx != layer_idx:
+                continue
             sequence_position = source_node[1]
             att_head = source_node[2]
             if set_irrel_to_mean:
@@ -55,6 +58,9 @@ def set_rel_at_source_nodes(rel, irrel, source_nodes, layer_mean_acts, sa_module
                 irrel[:, sequence_position, att_head, :] = 0
     else:     
         for entry in source_nodes:
+            source_node_layer_idx = entry[0]
+            if source_node_layer_idx != layer_idx:
+                continue
             sequence_position = entry[1]
             att_head = entry[2]
 

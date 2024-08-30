@@ -1,5 +1,5 @@
 from fancy_einsum import einsum
-
+from collections import namedtuple
 '''
 These wrapper classes are used to make the GPT modules work with code intended for a HuggingFace
 BERT model.
@@ -114,6 +114,10 @@ class TargetNodeDecompositionList:
         s.rels = self.rels + other.rels
         s.irrels = self.irrels + other.irrels
         return s
+
+# TODO: use this everywhere
+Node = namedtuple('Node', ('layer_idx', 'sequence_idx', 'attn_head_idx'))
+
 
 # TODO: some classes that are just lists, but have names so that it's less confusing what they are, particularly for the target decomposition return type
 # see subclassing userlist:
