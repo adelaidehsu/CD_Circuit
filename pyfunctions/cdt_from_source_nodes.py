@@ -31,6 +31,7 @@ def prop_self_attention_patched(rel, irrel, attention_mask,
 
 
 def set_rel_at_source_nodes(rel, irrel, source_nodes, layer_mean_acts, sa_module, set_irrel_to_mean, device):
+
     if set_irrel_to_mean and layer_mean_acts is None:
         print("Tried to set decomposition of source node using mean method but no mean activation tensor provided; returning immediately \
                (likely the resuling decomposition will be meaningless)")
@@ -41,16 +42,28 @@ def set_rel_at_source_nodes(rel, irrel, source_nodes, layer_mean_acts, sa_module
         layer_mean_acts = reshape_separate_attention_heads(layer_mean_acts, sa_module)
         layer_mean_acts = layer_mean_acts[None, :, :, :] # add on a batch dimension
         
-    for entry in source_nodes:
-        pos = entry[1]
-        att_head = entry[2]
-        
-        if set_irrel_to_mean:
-            rel[:, pos, att_head, :] = irrel[:, pos, att_head, :] + rel[:, pos, att_head, :] - torch.Tensor(layer_mean_acts[:, pos, att_head, :]).to(device)
-            irrel[:, pos, att_head, :] = torch.Tensor(layer_mean_acts[:, pos, att_head, :]).to(device)
-        else:
-            rel[:, pos, att_head, :] = irrel[:, pos, att_head, :] + rel[:, pos, att_head, :]
-            irrel[:, pos, att_head, :] = 0
+    # temporary, for transitioning from list of source nodes to dict which maps source nodes to batch indices
+    if isinstance(source_nodes, dict):
+        for source_node, batch_indices in source_nodes.items():
+            sequence_position = source_node[1]
+            att_head = source_node[2]
+            if set_irrel_to_mean:
+                rel[batch_indices, sequence_position, att_head, :] = irrel[batch_indices, sequence_position, att_head, :] + rel[batch_indices, sequence_position, att_head, :] - torch.Tensor(layer_mean_acts[:, sequence_position, att_head, :]).to(device)
+                irrel[batch_indices, sequence_position, att_head, :] = torch.Tensor(layer_mean_acts[:, sequence_position, att_head, :]).to(device)
+            else:
+                rel[:, sequence_position, att_head, :] = irrel[:, sequence_position, att_head, :] + rel[:, sequence_position, att_head, :]
+                irrel[:, sequence_position, att_head, :] = 0
+    else:     
+        for entry in source_nodes:
+            sequence_position = entry[1]
+            att_head = entry[2]
+
+            if set_irrel_to_mean:
+                rel[:, sequence_position, att_head, :] = irrel[:, sequence_position, att_head, :] + rel[:, sequence_position, att_head, :] - torch.Tensor(layer_mean_acts[:, sequence_position, att_head, :]).to(device)
+                irrel[:, sequence_position, att_head, :] = torch.Tensor(layer_mean_acts[:, sequence_position, att_head, :]).to(device)
+            else:
+                rel[:, sequence_position, att_head, :] = irrel[:, sequence_position, att_head, :] + rel[:, sequence_position, att_head, :]
+                irrel[:, sequence_position, att_head, :] = 0
 
     
     rel = reshape_concatenate_attention_heads(rel, sa_module)
@@ -161,8 +174,8 @@ def prop_encoder_patched(rel, irrel, attention_mask, head_mask, encoder_module, 
 def prop_classifier_model_patched(encoding, model, device, source_nodes=[], mean_acts=None, 
                                   att_list = None, output_att_prob=False, output_context=False,
                                   set_irrel_to_mean=False):
-    # source_nodes: attention heads to patch. format: [(level, pos, head)]
-    # level: 0-11, pos: 0-511, head: 0-11
+    # source_nodes: attention heads to patch. format: [(level, sequence_position, head)]
+    # level: 0-11, sequence_position: 0-511, head: 0-11
     # rel_out: the contribution of the source_nodes
     # irrel_out: the contribution of everything else``
     

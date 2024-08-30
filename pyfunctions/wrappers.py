@@ -89,11 +89,33 @@ Helper classes for readability.
 '''
 
 class OutputDecomposition:
-    def __init__(self, rel, irrel):
+    def __init__(self, source_node, rel, irrel):
+        self.source_node = source_node
         self.rel = rel
         self.irrel = irrel
 
-class TargetDecomposition:
-    def __init__(self, rel, irrel):
-        self.rel = rel
-        self.irrel = irrel        
+class TargetNodeDecompositionList:
+    def __init__(self, source_node):
+        self.source_node = source_node
+        self.target_nodes = []
+        self.rels = []
+        self.irrels = []
+
+    def append(self, target_node, rel, irrel):
+        self.target_nodes.append(target_node)
+        self.rels.append(rel)
+        self.irrels.append(irrel)
+
+    # hopefully this doesn't slow things down too much with a bunch of reallocations
+    def __add__(self, other):
+        assert self.source_node == other.source_node
+        s = TargetNodeDecompositionList(self.source_node)
+        s.target_nodes = self.target_nodes + other.target_nodes
+        s.rels = self.rels + other.rels
+        s.irrels = self.irrels + other.irrels
+        return s
+
+# TODO: some classes that are just lists, but have names so that it's less confusing what they are, particularly for the target decomposition return type
+# see subclassing userlist:
+# https://stackoverflow.com/questions/8180014/how-to-subclass-python-list-without-type-problems/8180073#8180073
+# https://docs.python.org/3/library/collections.html#collections.UserList

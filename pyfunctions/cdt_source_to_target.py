@@ -1,28 +1,43 @@
 from pyfunctions.cdt_from_source_nodes import *
 from transformers.activations import NewGELUActivation
 import pdb
-from pyfunctions.wrappers import GPTAttentionWrapper, GPTLayerNormWrapper, OutputDecomposition
+from pyfunctions.wrappers import GPTAttentionWrapper, GPTLayerNormWrapper, OutputDecomposition, TargetNodeDecompositionList
 
-def calculate_contributions(rel, irrel, source_node_list, target_nodes, level, sa_module, device):
+def calculate_contributions_new(rel, irrel, source_node_dict, target_nodes, level, sa_module, device):
+    rel = reshape_separate_attention_heads(rel, sa_module)
+    irrel = reshape_separate_attention_heads(irrel, sa_module)
+    target_nodes_at_level = [node for node in target_nodes if node[0] == level]
+    target_decomps = []
+    
+    for source_node, batch_indices in source_node_dict.items():
+        target_decomps_for_node = TargetNodeDecompositionList(source_node)            
+
+        for t in target_nodes_at_level:
+                t_pos = t[1]
+                t_head = t[2]
+                target_decomps_for_node.append(t, rel[batch_indices, t_pos, t_head, :],
+                                                irrel[batch_indices, t_pos, t_head, :])
+        target_decomps.append(target_decomps_for_node)
+    return target_decomps
+
+# Deprecated. Try to transition to calculate_contributions_new, which should make results easier to parse, and supports batch dimension.
+def calculate_contributions(rel, irrel, source_nodes, target_nodes, level, sa_module, device):
     rel = reshape_separate_attention_heads(rel, sa_module)
     irrel = reshape_separate_attention_heads(irrel, sa_module)
     target_nodes_at_level = [node for node in target_nodes if node[0] == level]
     target_decomps = []
 
-    #for s_ind, _ in enumerate(source_node_list):
-    out_shape = (len(target_nodes_at_level), sa_module.attention_head_size)
+    for s_ind, _ in enumerate(source_nodes):
+        out_shape = (len(target_nodes_at_level), sa_module.attention_head_size)
+        
+        rel_st = torch.zeros(out_shape, dtype = rel.dtype, device = device)
+        irrel_st = torch.zeros(out_shape, dtype = rel.dtype, device = device)
 
     rel_st = torch.zeros(out_shape, dtype = rel.dtype, device = device)
     irrel_st = torch.zeros(out_shape, dtype = rel.dtype, device = device)
 
-    for t_ind, t in enumerate(target_nodes_at_level):
-        t_pos = t[1]
-        t_head = t[2]
-        rel_st[t_ind, :] = rel[:, t_pos, t_head, :]
-        irrel_st[t_ind, :] = irrel[:, t_pos, t_head, :]
-
-    target_decomps.append((rel_st.detach().cpu().numpy(), irrel_st.detach().cpu().numpy()))
-    
+        target_decomps.append((rel_st.detach().cpu().numpy(), irrel_st.detach().cpu().numpy()))
+    # currently returns list indexed by source node of (rel, irrel), rel indexed by t
     return target_decomps
 
 # This function handles what is usually called the attention mechanism, up to the point
@@ -141,7 +156,7 @@ def prop_BERT_layer_hh(rel, irrel, attention_mask, head_mask,
     return rel_out, irrel_out, target_decomps, returned_att_probs
 
 def prop_GPT_layer_hh(rel, irrel, attention_mask, head_mask, 
-                  source_node_list, target_nodes, level, layer_mean_acts,
+                  source_node_dict, target_nodes, level, layer_mean_acts,
                   layer_module, device, att_probs = None, output_att_prob=False, set_irrel_to_mean=False):
     # TODO: there should be some kind of casework for the folded layernorm,
     # if we want to perfectly apples-to-apples reproduce the IOI paper. 
@@ -155,8 +170,8 @@ def prop_GPT_layer_hh(rel, irrel, attention_mask, head_mask,
 
     rel_attn_residual, irrel_attn_residual = prop_linear(rel_summed_values, irrel_summed_values, attn_wrapper.output)
     # now that we've calculated the output of the attention mechanism, set desired inputs to "relevant"
-    rel_attn_residual, irrel_attn_residual = set_rel_at_source_nodes(rel_attn_residual, irrel_attn_residual, source_node_list, layer_mean_acts, attn_wrapper, set_irrel_to_mean, device)
-    layer_target_decomps = calculate_contributions(rel_attn_residual, irrel_attn_residual, source_node_list,
+    rel_attn_residual, irrel_attn_residual = set_rel_at_source_nodes(rel_attn_residual, irrel_attn_residual, source_node_dict, layer_mean_acts, attn_wrapper, set_irrel_to_mean, device)
+    layer_target_decomps = calculate_contributions_new(rel_attn_residual, irrel_attn_residual, source_node_dict,
                                                                            target_nodes, level,
                                                                            attn_wrapper, device=device)
     rel_mid, irrel_mid = rel + rel_attn_residual, irrel + irrel_attn_residual
@@ -280,17 +295,19 @@ def prop_GPT(encoding_idxs, extended_attention_mask, model, source_node_list, ta
                              mean_acts=None, att_list = None, output_att_prob=False, set_irrel_to_mean=False):
     
     embedding_output = model.embed(encoding_idxs) + model.pos_embed(encoding_idxs) 
-    
-    
     head_mask = [None] * len(model.blocks)
-    
-    sh = list(embedding_output.shape)
-    sh[0] = len(source_node_list)
-    
-    rel = torch.zeros(sh, dtype = embedding_output.dtype, device = device)
-    irrel = torch.zeros(sh, dtype = embedding_output.dtype, device = device)
-    
-    irrel[:] = embedding_output[:]
+
+    # we have to do a "separate" forward pass for each source node decomposition
+    # so unroll the source nodes along the batch dimension, but keep track of which
+    # "examples" belong to which source nodes
+    actual_batch_size = encoding_idxs.size()[0]
+    source_node_dict = {}
+    start_batch_idx = 0
+    for source_node in source_node_list:
+        source_node_dict[source_node] = list(range(start_batch_idx, start_batch_idx + actual_batch_size))
+
+    irrel = embedding_output.repeat(len(source_node_list), 1, 1)
+    rel = torch.zeros(irrel.size(), dtype = embedding_output.dtype, device = device)
     
     target_decomps = []
     att_probs_lst = []
@@ -304,7 +321,7 @@ def prop_GPT(encoding_idxs, extended_attention_mask, model, source_node_list, ta
             layer_mean_acts = None
             
         rel, irrel, layer_target_decomps, returned_att_probs = prop_GPT_layer_hh(rel, irrel, extended_attention_mask, 
-                                                                                 layer_head_mask, source_node_list, 
+                                                                                 layer_head_mask, source_node_dict, 
                                                                                  target_nodes, i, 
                                                                                  layer_mean_acts,
                                                                                  layer_module, 
@@ -320,11 +337,11 @@ def prop_GPT(encoding_idxs, extended_attention_mask, model, source_node_list, ta
     
     out_decomps = []
 
-    for i, sn_list in enumerate(source_node_list):
-        rel_vec = rel_out[i, :].detach().cpu().numpy()
-        irrel_vec = irrel_out[i, :].detach().cpu().numpy()
+    for source_node, batch_indices in source_node_dict.items():
+        rel_vec = rel_out[batch_indices, :].detach().cpu().numpy()
+        irrel_vec = irrel_out[batch_indices, :].detach().cpu().numpy()
         
-        out_decomps.append(OutputDecomposition(rel_vec, irrel_vec))
+        out_decomps.append(OutputDecomposition(source_node, rel_vec, irrel_vec))
     
     return out_decomps, target_decomps, att_probs_lst
 
