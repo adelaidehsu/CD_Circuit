@@ -9,20 +9,19 @@ def calculate_contributions(rel, irrel, source_node_list, target_nodes, level, s
     target_nodes_at_level = [node for node in target_nodes if node[0] == level]
     target_decomps = []
 
-    for s_ind, _ in enumerate(source_node_list):
-        out_shape = (len(target_nodes_at_level), sa_module.attention_head_size)
-        
-        rel_st = torch.zeros(out_shape, dtype = rel.dtype, device = device)
-        irrel_st = torch.zeros(out_shape, dtype = rel.dtype, device = device)
+    #for s_ind, _ in enumerate(source_node_list):
+    out_shape = (len(target_nodes_at_level), sa_module.attention_head_size)
 
-        for t_ind, t in enumerate(target_nodes_at_level):
-            if t[0] == level:
-                t_pos = t[1]
-                t_head = t[2]
-                rel_st[t_ind, :] = rel[s_ind, t_pos, t_head, :]
-                irrel_st[t_ind, :] = irrel[s_ind, t_pos, t_head, :]
+    rel_st = torch.zeros(out_shape, dtype = rel.dtype, device = device)
+    irrel_st = torch.zeros(out_shape, dtype = rel.dtype, device = device)
 
-        target_decomps.append((rel_st.detach().cpu().numpy(), irrel_st.detach().cpu().numpy()))
+    for t_ind, t in enumerate(target_nodes_at_level):
+        t_pos = t[1]
+        t_head = t[2]
+        rel_st[t_ind, :] = rel[:, t_pos, t_head, :]
+        irrel_st[t_ind, :] = irrel[:, t_pos, t_head, :]
+
+    target_decomps.append((rel_st.detach().cpu().numpy(), irrel_st.detach().cpu().numpy()))
     
     return target_decomps
 
@@ -160,8 +159,8 @@ def prop_GPT_layer_hh(rel, irrel, attention_mask, head_mask,
 
 def prop_BERT_hh(encoding, model, source_node_list, target_nodes, device,
                              mean_acts=None, output_att_prob=False, set_irrel_to_mean=False):
-    embedding_output = get_embeddings_bert(encoding, model)
     
+    embedding_output = get_embeddings_bert(encoding, model)
     input_shape = encoding['input_ids'].size()
     extended_attention_mask = get_extended_attention_mask(encoding.attention_mask, 
                                                             input_shape, 
@@ -172,49 +171,60 @@ def prop_BERT_hh(encoding, model, source_node_list, target_nodes, device,
     encoder_module = model.bert.encoder
     
     sh = list(embedding_output.shape)
-    sh[0] = len(source_node_list)
-    
-    rel = torch.zeros(sh, dtype = embedding_output.dtype, device = device)
-    irrel = torch.zeros(sh, dtype = embedding_output.dtype, device = device)
-    
-    irrel[:] = embedding_output[:]
-    
+    #sh[0] = len(source_node_list)
+
     target_decomps = []
     att_probs_lst = []
-    for i, layer_module in enumerate(encoder_module.layer):
-        layer_head_mask = head_mask[i]
-        att_probs = None
-        
-        if mean_acts is not None:
-            layer_mean_acts = mean_acts[i] #[512, 12, 64]
-        else:
-            layer_mean_acts = None
-            
-        rel_n, irrel_n, layer_target_decomps, returned_att_probs = prop_BERT_layer_hh(rel, irrel, extended_attention_mask, 
-                                                                                 layer_head_mask, source_node_list, 
-                                                                                 target_nodes, i, 
-                                                                                 layer_mean_acts,
-                                                                                 layer_module, 
-                                                                                 device,
-                                                                                 att_probs, output_att_prob,
-                                                                                 set_irrel_to_mean=set_irrel_to_mean)
-        target_decomps.append(layer_target_decomps)
-        normalize_rel_irrel(rel_n, irrel_n)
-        rel, irrel = rel_n, irrel_n
-        
-        if output_att_prob:
-            att_probs_lst.append(returned_att_probs.squeeze(0))
-    
-    rel_pool, irrel_pool = prop_pooler(rel, irrel, model.bert.pooler)
-    rel_out, irrel_out = prop_linear(rel_pool, irrel_pool, model.classifier)
-    
     out_decomps = []
+    
+    # source_node_list should be a List[List], sotring batches of source nodes to ablate
+    for source_node_batch in source_node_list:
+        
+        rel = torch.zeros(sh, dtype = embedding_output.dtype, device = device)
+        irrel = torch.zeros(sh, dtype = embedding_output.dtype, device = device)
+        irrel[:] = embedding_output[:]
+        
+        batch_target_decomps = []
+        
+        for i, layer_module in enumerate(encoder_module.layer):
+            # select source nodes on layer i
+            layer_source_node_list = [x for x in source_node_batch if x[0] == i]
 
-    for i, sn_list in enumerate(source_node_list):
-        rel_vec = rel_out[i, :].detach().cpu().numpy()
-        irrel_vec = irrel_out[i, :].detach().cpu().numpy()
+            layer_head_mask = head_mask[i]
+            att_probs = None
+
+            if mean_acts is not None:
+                layer_mean_acts = mean_acts[i] #[512, 12, 64]
+            else:
+                layer_mean_acts = None
+
+            rel_n, irrel_n, layer_target_decomps, returned_att_probs = prop_BERT_layer_hh(rel, irrel, extended_attention_mask, 
+                                                                                     layer_head_mask, layer_source_node_list, # only ablate source node on this layer
+                                                                                     target_nodes, i, 
+                                                                                     layer_mean_acts,
+                                                                                     layer_module, 
+                                                                                     device,
+                                                                                     att_probs, output_att_prob,
+                                                                                     set_irrel_to_mean=set_irrel_to_mean)
+            #target_decomps.append(layer_target_decomps)
+            batch_target_decomps.extend(layer_target_decomps)
+            
+            normalize_rel_irrel(rel_n, irrel_n)
+            rel, irrel = rel_n, irrel_n
+
+            if output_att_prob:
+                att_probs_lst.append(returned_att_probs.squeeze(0))
+
+        rel_pool, irrel_pool = prop_pooler(rel, irrel, model.bert.pooler)
+        rel_out, irrel_out = prop_linear(rel_pool, irrel_pool, model.classifier)
+    
+    
+
+        rel_vec = rel_out.detach().cpu().numpy()
+        irrel_vec = irrel_out.detach().cpu().numpy()
         
         out_decomps.append((rel_vec, irrel_vec))
+        target_decomps.append(batch_target_decomps)
     
     return out_decomps, target_decomps, att_probs_lst
 
