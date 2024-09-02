@@ -53,6 +53,9 @@ def set_rel_at_source_nodes(rel, irrel, source_nodes, layer_mean_acts, layer_idx
             if set_irrel_to_mean:
                 rel[batch_indices, sequence_position, att_head, :] = irrel[batch_indices, sequence_position, att_head, :] + rel[batch_indices, sequence_position, att_head, :] - torch.Tensor(layer_mean_acts[:, sequence_position, att_head, :]).to(device)
                 irrel[batch_indices, sequence_position, att_head, :] = torch.Tensor(layer_mean_acts[:, sequence_position, att_head, :]).to(device)
+                # TODO: debug why some things appear to be the same depsite this edit
+                # print("set rel/irrel for source node, batch_idx ", source_node, batch_indices)
+                # print("mean act was: ", layer_mean_acts[0, sequence_position, att_head])
             else:
                 rel[:, sequence_position, att_head, :] = irrel[:, sequence_position, att_head, :] + rel[:, sequence_position, att_head, :]
                 irrel[:, sequence_position, att_head, :] = 0

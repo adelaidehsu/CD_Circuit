@@ -172,7 +172,6 @@ def prop_GPT_layer_hh(rel, irrel, attention_mask, head_mask,
     layer_target_decomps = calculate_contributions_new(rel_attn_residual, irrel_attn_residual, source_node_dict,
                                                                            target_nodes, level,
                                                                            attn_wrapper, device=device)
-    layer_target_decomps = None
     rel_mid, irrel_mid = rel + rel_attn_residual, irrel + irrel_attn_residual
     rel_mid_norm, irrel_mid_norm = prop_layer_norm(rel_mid, irrel_mid, GPTLayerNormWrapper(layer_module.ln2))
     
@@ -311,7 +310,6 @@ def prop_GPT(encoding_idxs, extended_attention_mask, model, source_node_list, ta
     
     target_decomps = []
     att_probs_lst = []
-    # print(irrel)
     for i, layer_module in enumerate(model.blocks):
         layer_head_mask = head_mask[i]
         att_probs = None
@@ -334,8 +332,7 @@ def prop_GPT(encoding_idxs, extended_attention_mask, model, source_node_list, ta
         
         if output_att_prob:
             att_probs_lst.append(returned_att_probs.squeeze(0))
-    # print(source_node_dict)
-    # print(rel.shape)
+
     rel, irrel = prop_layer_norm(rel, irrel, GPTLayerNormWrapper(model.ln_final))
     rel_out, irrel_out = prop_GPT_unembed(rel, irrel, model.unembed)
     
@@ -346,7 +343,6 @@ def prop_GPT(encoding_idxs, extended_attention_mask, model, source_node_list, ta
         irrel_vec = irrel_out[batch_indices, :].detach().cpu().numpy()
         
         out_decomps.append(OutputDecomposition(source_node, rel_vec, irrel_vec))
-    
     return out_decomps, target_decomps, att_probs_lst
 
 '''
@@ -368,6 +364,6 @@ def batch_run(prop_model_fn, source_node_list, num_at_time=64, n_layers=12):
         batch_out_decomps, batch_target_decomps, _, _ = prop_model_fn(source_node_list[b_st: b_end])
 
         out_decomps = out_decomps + batch_out_decomps
-        target_decomps = None #[target_decomps[i] + batch_target_decomps[i] for i in range(3)]
+        target_decomps = [target_decomps[i] + batch_target_decomps[i] for i in range(n_layers)]
     
     return out_decomps, target_decomps
