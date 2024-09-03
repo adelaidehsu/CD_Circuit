@@ -77,7 +77,9 @@ def prop_act(r, ir, act_mod):
     ir_act = act_mod(ir)
     r_act = act_mod(r + ir) - ir_act
     return r_act, ir_act
-
+x -> Wx + B
+x = rel + irrel
+rel_new + irrel_new = Wx + b 
 def prop_linear_core(rel, irrel, W, b, tol = 1e-8):
     rel_t = torch.matmul(rel, W)
     irrel_t = torch.matmul(irrel, W)    

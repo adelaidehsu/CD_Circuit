@@ -1,6 +1,7 @@
 from pyfunctions.cdt_basic import *
+from pyfunctions.wrappers import AblationSet, Node
 
-def reshape_separate_attention_heads(context_layer, sa_module):
+def reshape_separate_attention_heads(context_lyaer, sa_module):
     new_shape = context_layer.size()[:-1] + (sa_module.num_attention_heads, sa_module.attention_head_size)
     context_layer = context_layer.view(new_shape)
     return context_layer
@@ -30,7 +31,7 @@ def prop_self_attention_patched(rel, irrel, attention_mask,
         return rel_context, irrel_context, None
 
 
-def set_rel_at_source_nodes(rel, irrel, source_nodes, layer_mean_acts, layer_idx, sa_module, set_irrel_to_mean, device):
+def set_rel_at_source_nodes(rel, irrel, ablation_dict, layer_mean_acts, layer_idx, sa_module, set_irrel_to_mean, device):
 
     if set_irrel_to_mean and layer_mean_acts is None:
         print("Tried to set decomposition of source node using mean method but no mean activation tensor provided; returning immediately \
@@ -43,36 +44,34 @@ def set_rel_at_source_nodes(rel, irrel, source_nodes, layer_mean_acts, layer_idx
         layer_mean_acts = layer_mean_acts[None, :, :, :] # add on a batch dimension
     
     # temporary, for transitioning from list of source nodes to dict which maps source nodes to batch indices
-    if isinstance(source_nodes, dict):
-        for source_node, batch_indices in source_nodes.items():
-            source_node_layer_idx = source_node[0]
-            if source_node_layer_idx != layer_idx:
-                continue
-            sequence_position = source_node[1]
-            att_head = source_node[2]
-            if set_irrel_to_mean:
-                rel[batch_indices, sequence_position, att_head, :] = irrel[batch_indices, sequence_position, att_head, :] + rel[batch_indices, sequence_position, att_head, :] - torch.Tensor(layer_mean_acts[:, sequence_position, att_head, :]).to(device)
-                irrel[batch_indices, sequence_position, att_head, :] = torch.Tensor(layer_mean_acts[:, sequence_position, att_head, :]).to(device)
-                # TODO: debug why some things appear to be the same depsite this edit
-                # print("set rel/irrel for source node, batch_idx ", source_node, batch_indices)
-                # print("mean act was: ", layer_mean_acts[0, sequence_position, att_head])
-            else:
-                rel[:, sequence_position, att_head, :] = irrel[:, sequence_position, att_head, :] + rel[:, sequence_position, att_head, :]
-                irrel[:, sequence_position, att_head, :] = 0
+    if isinstance(ablation_dict, dict):
+        for ablation, batch_indices in ablation_dict.items():
+            for source_node in ablation:
+                if source_node.layer_idx != layer_idx:
+                    continue
+                sq = source_node.sequence_idx
+                head = source_node.attn_head_idx
+                if set_irrel_to_mean:
+                    rel[batch_indices, sq, head, :] = irrel[batch_indices, sq, head, :] + rel[batch_indices, sq, head, :] - torch.Tensor(layer_mean_acts[:, sq, head, :]).to(device)
+                    irrel[batch_indices, sq, head, :] = torch.Tensor(layer_mean_acts[:, sq, head, :]).to(device)
+                else:
+                    rel[:, sq, head, :] = irrel[:, sq, head, :] + rel[:, sq, head, :]
+                    irrel[:, sq, head, :] = 0
     else:     
-        for entry in source_nodes:
-            source_node_layer_idx = entry[0]
-            if source_node_layer_idx != layer_idx:
-                continue
-            sequence_position = entry[1]
-            att_head = entry[2]
+        for ablation in ablation_dict:
+            for source_node in ablation:
+                source_node_layer_idx = entry[0]
+                if source_node_layer_idx != layer_idx:
+                    continue
+                sq = entry[1]
+                head = entry[2]
 
-            if set_irrel_to_mean:
-                rel[:, sequence_position, att_head, :] = irrel[:, sequence_position, att_head, :] + rel[:, sequence_position, att_head, :] - torch.Tensor(layer_mean_acts[:, sequence_position, att_head, :]).to(device)
-                irrel[:, sequence_position, att_head, :] = torch.Tensor(layer_mean_acts[:, sequence_position, att_head, :]).to(device)
-            else:
-                rel[:, sequence_position, att_head, :] = irrel[:, sequence_position, att_head, :] + rel[:, sequence_position, att_head, :]
-                irrel[:, sequence_position, att_head, :] = 0
+                if set_irrel_to_mean:
+                    rel[:, sq, head, :] = irrel[:, sq, head, :] + rel[:, sq, head, :] - torch.Tensor(layer_mean_acts[:, sq, head, :]).to(device)
+                    irrel[:, sq, head, :] = torch.Tensor(layer_mean_acts[:, sq, head, :]).to(device)
+                else:
+                    rel[:, sq, head, :] = irrel[:, sq, head, :] + rel[:, sq, head, :]
+                    irrel[:, sq, head, :] = 0
 
     
     rel = reshape_concatenate_attention_heads(rel, sa_module)

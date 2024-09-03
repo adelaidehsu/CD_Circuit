@@ -1,5 +1,8 @@
 from fancy_einsum import einsum
-from collections import namedtuple
+from typing import NamedTuple
+import torch
+from dataclasses import dataclass
+
 '''
 These wrapper classes are used to make the GPT modules work with code intended for a HuggingFace
 BERT model.
@@ -88,15 +91,46 @@ class GPTAttentionWrapper():
 Helper classes for readability.
 '''
 
+'''
 class OutputDecomposition:
     def __init__(self, source_node, rel, irrel):
         self.source_node = source_node
         self.rel = rel
         self.irrel = irrel
+'''
+class Node(NamedTuple):
+    layer_idx: int
+    sequence_idx: int
+    attn_head_idx: int
 
+# Node = namedtuple('Node', ('layer_idx', 'sequence_idx', 'attn_head_idx'))
+
+class OutputDecomposition(NamedTuple):
+    source_node: Node
+    rel: torch.Tensor
+    irrel: torch.Tensor
+
+# "ablation" isn't the right thing to call this, exactly; it's the set of nodes
+# you want to decompose into (rel, irrel) in the forward pass
+# however, it performs a function analogous to ablation in other interpretability techniques,
+# in that we can determine the importance of these nodes
+
+'''
+class AblationSet:
+    def __init__(self, nodes: list[Node]):
+        self.nodes = nodes
+'''
+type AblationSet = tuple[Node]
+
+@dataclass
 class TargetNodeDecompositionList:
-    def __init__(self, source_node):
-        self.source_node = source_node
+    ablation_set: AblationSet
+    target_nodes: list[Node]
+    rels: list[torch.Tensor]
+    irrels: list[torch.Tensor]
+    
+    def __init__(self, ablation_set: AblationSet):
+        self.ablation_set = ablation_set
         self.target_nodes = []
         self.rels = []
         self.irrels = []
@@ -108,15 +142,13 @@ class TargetNodeDecompositionList:
 
     # hopefully this doesn't slow things down too much with a bunch of reallocations
     def __add__(self, other):
-        assert self.source_node == other.source_node
-        s = TargetNodeDecompositionList(self.source_node)
+        assert self.ablation_set == other.ablation_set
+        s = TargetNodeDecompositionList(self.ablation_set)
         s.target_nodes = self.target_nodes + other.target_nodes
         s.rels = self.rels + other.rels
         s.irrels = self.irrels + other.irrels
         return s
 
-# TODO: use this everywhere
-Node = namedtuple('Node', ('layer_idx', 'sequence_idx', 'attn_head_idx'))
 
 
 # TODO: some classes that are just lists, but have names so that it's less confusing what they are, particularly for the target decomposition return type

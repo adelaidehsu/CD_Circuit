@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import json
 import numpy as np
+import torch
 import collections
 import os
     
@@ -246,3 +247,14 @@ def compute_word_intervals(encoding, tokenizer):
     assert(len(interval_dict) == len(word_lst))
     
     return interval_dict, word_lst
+
+
+def compare_same(a, b, atol=1e-4, rtol=1e-3):
+    if isinstance(a, torch.Tensor):
+        a = a.cpu().numpy()
+    if isinstance(b, torch.Tensor):
+        b = b.cpu().numpy()
+    comparison = np.isclose(a, b, atol, rtol)
+    proportion = comparison.sum()/comparison.size
+    print(f"{proportion:.2%} of the values are equal")
+    return proportion
