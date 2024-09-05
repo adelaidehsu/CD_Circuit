@@ -46,7 +46,9 @@ def prop_attention_no_output_hh(rel, irrel, attention_mask,
     rel_context = mul_att(att_probs, rel_value, sa_module)
 
     irrel_context = mul_att(att_probs, irrel_value, sa_module)
-        
+    
+    #print(sa_module(rel+irrel)[0].all() == (rel_context+irrel_context).all()) #passed
+
     if output_att_prob:
         return rel_context, irrel_context, att_probs
     else:
@@ -63,28 +65,43 @@ def prop_BERT_attention_hh(rel, irrel, attention_mask,
                                                                         a_module.self,
                                                                         att_probs,
                                                                         output_att_prob=output_att_prob)
+    
+    #print(a_module.self(rel+irrel)[0].all() == (rel_context+irrel_context).all()) #passed
+    
+    #tmp = rel_context + irrel_context
     normalize_rel_irrel(rel_context, irrel_context)
+    #print((rel_context+irrel_context).all() == tmp.all()) #passed
     
     output_module = a_module.output
     
     rel_dense, irrel_dense = prop_linear(rel_context, irrel_context, output_module.dense)
+    #print(output_module.dense(rel_context+irrel_context).all() == (rel_dense+irrel_dense).all()) #passed
     
+    #tmp = rel_dense + irrel_dense
     normalize_rel_irrel(rel_dense, irrel_dense)
+    #print((rel_dense+irrel_dense).all() == tmp.all()) #passed
     
     rel_tot = rel_dense + rel
     irrel_tot = irrel_dense + irrel
     
+    #tmp = rel_tot + irrel_tot
     normalize_rel_irrel(rel_tot, irrel_tot)
+    #print((rel_tot+irrel_tot).all() == tmp.all()) #passed
 
     # now that we've calculated the output of the attention mechanism, set desired inputs to "relevant"
+    #tmp = rel_tot + irrel_tot
     rel_tot, irrel_tot = set_rel_at_source_nodes(rel_tot, irrel_tot, source_node_list, layer_mean_acts, a_module.self, set_irrel_to_mean, device)
+    #print((rel_tot+irrel_tot).all() == tmp.all()) #passed
     target_decomps = calculate_contributions(rel_tot, irrel_tot, source_node_list,
                                                                            target_nodes, level,
                                                                            a_module.self, device=device)
-    
+    #print((rel_tot+irrel_tot).all() == tmp.all()) #passed
     rel_out, irrel_out = prop_layer_norm(rel_tot, irrel_tot, output_module.LayerNorm)
-
+    #print(output_module.LayerNorm(rel_tot+irrel_tot).all() == (rel_out+irrel_out).all()) #passed
+    
+    #tmp = rel_out + irrel_out
     normalize_rel_irrel(rel_out, irrel_out)
+    #print((rel_out+irrel_out).all() == tmp.all()) #passed
     
     return rel_out, irrel_out, target_decomps, returned_att_probs
 
@@ -99,14 +116,19 @@ def prop_BERT_layer_hh(rel, irrel, attention_mask, head_mask,
                                                                            device,
                                                                            att_probs, output_att_prob, set_irrel_to_mean=set_irrel_to_mean)
 
+    #print(layer_module.attention(rel+irrel)[0].all() == (rel_a+irrel_a).all()) #passed
+    
     i_module = layer_module.intermediate
     rel_id, irrel_id = prop_linear(rel_a, irrel_a, i_module.dense)
+    #print(i_module.dense(rel_a+irrel_a).all() == (rel_id+irrel_id).all()) #passed
     normalize_rel_irrel(rel_id, irrel_id)
     
     rel_iact, irrel_iact = prop_act(rel_id, irrel_id, i_module.intermediate_act_fn)
-    
+    #print(i_module.intermediate_act_fn(rel_id+irrel_id).all() == (rel_iact+irrel_iact).all()) #passed
+
     o_module = layer_module.output
     rel_od, irrel_od = prop_linear(rel_iact, irrel_iact, o_module.dense)
+    #print(o_module.dense(rel_iact+irrel_iact).all() == (rel_od+irrel_od).all()) #passed
     normalize_rel_irrel(rel_od, irrel_od)
     
     rel_tot = rel_od + rel_a
@@ -114,7 +136,7 @@ def prop_BERT_layer_hh(rel, irrel, attention_mask, head_mask,
     normalize_rel_irrel(rel_tot, irrel_tot)
 
     rel_out, irrel_out = prop_layer_norm(rel_tot, irrel_tot, o_module.LayerNorm)
-    
+    #print(o_module.LayerNorm(rel_tot+irrel_tot).all() == (rel_out+irrel_out).all()) #passed
     
     return rel_out, irrel_out, target_decomps, returned_att_probs
 
@@ -206,6 +228,7 @@ def prop_BERT_hh(encoding, model, source_node_list, target_nodes, device,
                                                                                      device,
                                                                                      att_probs, output_att_prob,
                                                                                      set_irrel_to_mean=set_irrel_to_mean)
+            #print(layer_module(rel+irrel)[0].all() == (rel_n+irrel_n).all()) #passed
             #target_decomps.append(layer_target_decomps)
             batch_target_decomps.extend(layer_target_decomps)
             

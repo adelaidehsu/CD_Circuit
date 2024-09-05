@@ -61,26 +61,6 @@ def get_att_list(embedding_output, rel_pos,
     
     return att_scores
 
-def get_closest_competitor(model, encoding, label, le_dict):
-    
-    model_output = model(**encoding)
-    lab_index = le_dict[label]
-
-    output = model_output[0].clone().cpu().detach().numpy().squeeze()
-    sort_inds = np.argsort(output)
-
-    if sort_inds[-1] != lab_index:
-        return sort_inds[-1], lab_index
-    else:
-        return sort_inds[-2], lab_index
-
-# Custom Score Processing function
-def proc_score(tot_score, lab_index, closest_competitor):
-    return float(tot_score[lab_index] - tot_score[closest_competitor])
-
-def get_rel_inds(start, stop):
-    return list(range(start, stop + 1))
-
 # prop functions
 """
 def prop_act(rel, irrel, act_module):
@@ -327,14 +307,19 @@ def prop_attention(rel, irrel, attention_mask, head_mask, a_module, att_probs = 
                                                      attention_mask, 
                                                      head_mask, 
                                                      a_module.self, att_probs)
+    normalize_rel_irrel(rel_context, irrel_context) # add
     
     output_module = a_module.output
     
     rel_dense, irrel_dense = prop_linear(rel_context, irrel_context, output_module.dense)
+    normalize_rel_irrel(rel_dense, irrel_dense) # add
+    
     rel_tot = rel_dense + rel
     irrel_tot = irrel_dense + irrel
+    normalize_rel_irrel(rel_tot, irrel_tot) # add
     
     rel_out, irrel_out = prop_layer_norm(rel_tot, irrel_tot, output_module.LayerNorm)
+    normalize_rel_irrel(rel_out, irrel_out) # add
     
     return rel_out, irrel_out
 
@@ -343,13 +328,16 @@ def prop_layer(rel, irrel, attention_mask, head_mask, layer_module, att_probs = 
     
     i_module = layer_module.intermediate
     rel_id, irrel_id = prop_linear(rel_a, irrel_a, i_module.dense)
+    normalize_rel_irrel(rel_id, irrel_id) # add
     rel_iact, irrel_iact = prop_act(rel_id, irrel_id, i_module.intermediate_act_fn)
     
     o_module = layer_module.output
     rel_od, irrel_od = prop_linear(rel_iact, irrel_iact, o_module.dense)
+    normalize_rel_irrel(rel_od, irrel_od) # add
     
     rel_tot = rel_od + rel_a
     irrel_tot = irrel_od + irrel_a
+    normalize_rel_irrel(rel_tot, irrel_tot) # add
     
     rel_out, irrel_out = prop_layer_norm(rel_tot, irrel_tot, o_module.LayerNorm)
         
@@ -386,7 +374,7 @@ def prop_encoder_from_level(rel, irrel, attention_mask, head_mask, encoder_modul
     
     return rel_enc, irrel_enc
 
-def prop_classifier_model_from_level(encoding, rel_ind_list, model, device, level = 0, att_list = None):
+def prop_classifier_model_from_level(encoding, rel_ind_list, model, device, max_seq_len = 512, level = 0, att_list = None):
     embedding_output = get_embeddings_bert(encoding, model)
     input_shape = encoding['input_ids'].size()
     extended_attention_mask = get_extended_attention_mask(attention_mask = encoding['attention_mask'], 
@@ -414,7 +402,7 @@ def prop_classifier_model_from_level(encoding, rel_ind_list, model, device, leve
     for i in range(tot_rel):
         rel_inds = rel_ind_list[i]
         # Hardcoded length at the moment
-        mask = np.isin(np.arange(512), rel_inds)
+        mask = np.isin(np.arange(max_seq_len), rel_inds)
 
         rel[i, mask, :] = embedding_output[0, mask, :]
         irrel[i, ~mask, :] = embedding_output[0, ~mask, :]
@@ -428,7 +416,7 @@ def prop_classifier_model_from_level(encoding, rel_ind_list, model, device, leve
     
     return rel_out, irrel_out
 
-def comp_cd_scores_level_skip(model, encoding, label, le_dict, device, level = 0, skip = 1, num_at_time = 64):
+def comp_cd_scores_level_skip(model, encoding, label, le_dict, device, max_seq_len = 512, level = 0, skip = 1, num_at_time = 64):
 
     closest_competitor, lab_index = get_closest_competitor(model, encoding, label, le_dict)
     
@@ -437,26 +425,55 @@ def comp_cd_scores_level_skip(model, encoding, label, le_dict, device, level = 0
                                                           [get_rel_inds(0, L - 1)],
                                                           model,
                                                           device,
+                                                          max_seq_len = max_seq_len,
                                                           level = level)
     tot_score = proc_score(tot_rel[0, :], lab_index, closest_competitor)
+    tot_irrel_score = proc_score(tot_irrel[0, :], lab_index, closest_competitor)
 
     # get scores
     unit_rel_ind_list = [get_rel_inds(i, min(L - 1, i + skip - 1)) for i in range(0, L, skip)]
 
     def proc_num_at_time(ind_list):
         scores = np.empty(0)
+        irrel_scores = np.empty(0) # for ablation purposes
         L = len(ind_list)
         for i in range(int(L / num_at_time) + 1):
-            cur_scores,_ = prop_classifier_model_from_level(encoding, 
+            cur_scores, cur_irrel = prop_classifier_model_from_level(encoding, 
                                                             ind_list[i * num_at_time: min(L, (i + 1) * num_at_time)], 
                                                             model,
                                                             device,
+                                                            max_seq_len = max_seq_len,
                                                             level = level)
-            cur_scores = np.array([proc_score(cur_scores[i, :], lab_index, closest_competitor) - tot_score 
-                                   for i in range(cur_scores.shape[0])])
+            #cur_scores = np.array([proc_score(cur_scores[i, :], lab_index, closest_competitor) - tot_score 
+            #                       for i in range(cur_scores.shape[0])])
+            cur_scores = np.array([proc_score(cur_scores[i, :], lab_index, closest_competitor) for i in range(cur_scores.shape[0])])
             scores = np.append(scores, cur_scores)
-        return scores
+            
+            cur_irrel = np.array([proc_score(cur_irrel[i, :], lab_index, closest_competitor) for i in range(cur_irrel.shape[0])])
+            irrel_scores = np.append(irrel_scores, cur_irrel)
+        return scores, irrel_scores
 
-    scores = proc_num_at_time(unit_rel_ind_list)
+    scores, irrel_scores = proc_num_at_time(unit_rel_ind_list)
     
-    return scores
+    return scores, irrel_scores
+
+
+def get_closest_competitor(model, encoding, label, le_dict):
+    
+    model_output = model(**encoding)
+    lab_index = le_dict[label]
+
+    output = model_output[0].clone().cpu().detach().numpy().squeeze()
+    sort_inds = np.argsort(output)
+
+    if sort_inds[-1] != lab_index:
+        return sort_inds[-1], lab_index
+    else:
+        return sort_inds[-2], lab_index
+
+# Custom Score Processing function
+def proc_score(tot_score, lab_index, closest_competitor):
+    return float(tot_score[lab_index] - tot_score[closest_competitor])
+
+def get_rel_inds(start, stop):
+    return list(range(start, stop + 1))
