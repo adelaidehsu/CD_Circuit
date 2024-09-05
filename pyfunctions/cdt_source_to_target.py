@@ -180,9 +180,8 @@ def prop_GPT_layer_hh(rel, irrel, attention_mask, head_mask,
     return rel_out, irrel_out, layer_target_decomps, returned_att_probs
 
 def prop_BERT_hh(encoding, model, source_node_list, target_nodes, device,
-                             mean_acts=None, output_att_prob=False, set_irrel_to_mean=False):
+                             mean_acts=None, output_att_prob=False, set_irrel_to_mean=False, cached_pre_layer_acts = None):
     
-    embedding_output = get_embeddings_bert(encoding, model)
     input_shape = encoding['input_ids'].size()
     extended_attention_mask = get_extended_attention_mask(encoding.attention_mask, 
                                                             input_shape, 
@@ -192,23 +191,44 @@ def prop_BERT_hh(encoding, model, source_node_list, target_nodes, device,
     head_mask = [None] * model.bert.config.num_hidden_layers
     encoder_module = model.bert.encoder
     
-    sh = list(embedding_output.shape)
+    # sh = list(embedding_output.shape)
     #sh[0] = len(source_node_list)
 
     target_decomps = []
     att_probs_lst = []
     out_decomps = []
     
+
     # source_node_list should be a List[List], sotring batches of source nodes to ablate
     for source_node_batch in source_node_list:
-        
-        rel = torch.zeros(sh, dtype = embedding_output.dtype, device = device)
-        irrel = torch.zeros(sh, dtype = embedding_output.dtype, device = device)
-        irrel[:] = embedding_output[:]
-        
+
+        if cached_pre_layer_acts is None:
+            pre_layer_acts = []
+            earliest_layer_to_run = 0 
+            latest_layer_to_run = len(encoder_module.layer) - 1 
+            irrel = get_embeddings_bert(encoding, model)
+            rel = torch.zeros(irrel.size(), dtype = irrel.dtype, device = device)
+        else:
+            pre_layer_acts = None
+            earliest_layer_to_run = len(encoder_module.layer)
+            for source_node in source_node_batch:
+                if source_node[0] < earliest_layer_to_run:
+                    earliest_layer_to_run = source_node[0]
+
+            latest_layer_to_run = 0 
+            for target_node in target_nodes:
+                if target_node[0] > latest_layer_to_run:
+                    latest_layer_to_run = target_node[0]
+                irrel = cached_pre_layer_acts[earliest_layer_to_run]                                                                                         
+                rel = torch.zeros(irrel.size(), dtype = irrel.dtype, device = device)
+
+
         batch_target_decomps = []
         
-        for i, layer_module in enumerate(encoder_module.layer):
+        for i in range(earliest_layer_to_run, latest_layer_to_run + 1):
+            if cached_pre_layer_acts is None:
+                pre_layer_acts.append(rel + irrel)
+            layer_module = encoder_module.layer[i]
             # select source nodes on layer i
             layer_source_node_list = [x for x in source_node_batch if x[0] == i]
 
@@ -249,7 +269,7 @@ def prop_BERT_hh(encoding, model, source_node_list, target_nodes, device,
         out_decomps.append((rel_vec, irrel_vec))
         target_decomps.append(batch_target_decomps)
     
-    return out_decomps, target_decomps, att_probs_lst
+    return out_decomps, target_decomps, att_probs_lst, pre_layer_acts
 
 
 # Single function, analogous to prop_BERT_hh, which should perform the tasks
@@ -324,7 +344,7 @@ def batch_run(prop_model_fn, source_node_list, num_at_time=64, n_layers=12):
     for b_no in range(n_batches):
         b_st = b_no * num_at_time
         b_end = min(b_st + num_at_time, n_source_lists)
-        batch_out_decomps, batch_target_decomps, _ = prop_model_fn(source_node_list[b_st: b_end])
+        batch_out_decomps, batch_target_decomps, _, _ = prop_model_fn(source_node_list[b_st: b_end])
 
         out_decomps = out_decomps + batch_out_decomps
         target_decomps = [target_decomps[i] + batch_target_decomps[i] for i in range(n_layers)]
