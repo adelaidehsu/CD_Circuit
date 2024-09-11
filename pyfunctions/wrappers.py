@@ -103,13 +103,6 @@ class Node(NamedTuple):
     sequence_idx: int
     attn_head_idx: int
 
-# Node = namedtuple('Node', ('layer_idx', 'sequence_idx', 'attn_head_idx'))
-
-class OutputDecomposition(NamedTuple):
-    source_node: Node
-    rel: torch.Tensor
-    irrel: torch.Tensor
-
 # "ablation" isn't the right thing to call this, exactly; it's the set of nodes
 # you want to decompose into (rel, irrel) in the forward pass
 # however, it performs a function analogous to ablation in other interpretability techniques,
@@ -121,6 +114,12 @@ class AblationSet:
         self.nodes = nodes
 '''
 type AblationSet = tuple[Node]
+
+
+class OutputDecomposition(NamedTuple):
+    ablation_set: AblationSet
+    rel: torch.Tensor
+    irrel: torch.Tensor
 
 @dataclass
 class TargetNodeDecompositionList:
@@ -148,10 +147,3 @@ class TargetNodeDecompositionList:
         s.rels = self.rels + other.rels
         s.irrels = self.irrels + other.irrels
         return s
-
-
-
-# TODO: some classes that are just lists, but have names so that it's less confusing what they are, particularly for the target decomposition return type
-# see subclassing userlist:
-# https://stackoverflow.com/questions/8180014/how-to-subclass-python-list-without-type-problems/8180073#8180073
-# https://docs.python.org/3/library/collections.html#collections.UserList

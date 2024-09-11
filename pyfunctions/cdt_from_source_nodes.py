@@ -1,7 +1,7 @@
 from pyfunctions.cdt_basic import *
 from pyfunctions.wrappers import AblationSet, Node
 
-def reshape_separate_attention_heads(context_lyaer, sa_module):
+def reshape_separate_attention_heads(context_layer, sa_module):
     new_shape = context_layer.size()[:-1] + (sa_module.num_attention_heads, sa_module.attention_head_size)
     context_layer = context_layer.view(new_shape)
     return context_layer
@@ -55,8 +55,8 @@ def set_rel_at_source_nodes(rel, irrel, ablation_dict, layer_mean_acts, layer_id
                     rel[batch_indices, sq, head, :] = irrel[batch_indices, sq, head, :] + rel[batch_indices, sq, head, :] - torch.Tensor(layer_mean_acts[:, sq, head, :]).to(device)
                     irrel[batch_indices, sq, head, :] = torch.Tensor(layer_mean_acts[:, sq, head, :]).to(device)
                 else:
-                    rel[:, sq, head, :] = irrel[:, sq, head, :] + rel[:, sq, head, :]
-                    irrel[:, sq, head, :] = 0
+                    rel[batch_indices, sq, head, :] = irrel[batch_indices, sq, head, :] + rel[batch_indices, sq, head, :]
+                    irrel[batch_indices, sq, head, :] = 0
     else:     
         for ablation in ablation_dict:
             for source_node in ablation:

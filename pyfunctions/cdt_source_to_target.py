@@ -169,11 +169,15 @@ def prop_GPT_layer_hh(rel, irrel, attention_mask, head_mask,
 
     rel_attn_residual, irrel_attn_residual = prop_linear(rel_summed_values, irrel_summed_values, attn_wrapper.output)
     # now that we've calculated the output of the attention mechanism, set desired inputs to "relevant"
-    rel_attn_residual, irrel_attn_residual = set_rel_at_source_nodes(rel_attn_residual, irrel_attn_residual, ablation_dict, layer_mean_acts, level, attn_wrapper, set_irrel_to_mean, device)
+    # print('irrel norm after set_rel_at_source_nodes: ', np.linalg.norm(irrel_attn_residual.cpu().numpy()))
+    # rel_attn_residual, irrel_attn_residual = set_rel_at_source_nodes(rel_attn_residual, irrel_attn_residual, ablation_dict, layer_mean_acts, level, attn_wrapper, set_irrel_to_mean, device)
+
     layer_target_decomps = calculate_contributions_new(rel_attn_residual, irrel_attn_residual, ablation_dict,
                                                                            target_nodes, level,
                                                                            attn_wrapper, device=device)
     rel_mid, irrel_mid = rel + rel_attn_residual, irrel + irrel_attn_residual
+    rel_mid, irrel_mid = set_rel_at_source_nodes(rel_mid, irrel_mid, ablation_dict, layer_mean_acts, level, attn_wrapper, set_irrel_to_mean, device)
+
     rel_mid_norm, irrel_mid_norm = prop_layer_norm(rel_mid, irrel_mid, GPTLayerNormWrapper(layer_module.ln2))
     
 
@@ -190,6 +194,7 @@ def prop_GPT_layer_hh(rel, irrel, attention_mask, head_mask,
     normalize_rel_irrel(rel_out, irrel_out)
 
     # there is not a layernorm at the end of this block, unlike in BERT    
+    # print('irrel_norm after adding MLP residual', np.linalg.norm(irrel_out.cpu().numpy()))
 
     return rel_out, irrel_out, layer_target_decomps, returned_att_probs
 
@@ -282,10 +287,11 @@ def prop_BERT_hh(encoding, model, ablation_list, target_nodes, device,
     return out_decomps, target_decomps, att_probs_lst, pre_layer_acts
 
 
-# Single function, analogous to prop_BERT_hh, which should perform the tasks
-#  of what is currently called prop_BERT_hh, prop_classifier_model_patched, and prop_classifier_model.
-# In order to get head-to-head contribution, pass in source and target nodes, and look at return val target_decomps.
-# In order to get source to logits contribution, pass in source nodes, and look at return val out_decomps.
+# In order to get the contribution of a set of source nodes to a set of target nodes, pass in both, and look at return val target_decomps.
+# In order to get the contribute of a set of source nodes to the logits, pass in source nodes, and look at return val out_decomps.
+# In order to optimize calculation speed by using cached values for the points before the first source node, pass in cached_pre_layer_acts.
+# Note that this will also end the calculation after the last target node is reached, which likely makes return val out_decomps meaningless.
+# To avoid this behavior, pass in empty target nodes (e.g, if you want to calculate contribution of source node to logits).
 def prop_GPT(encoding_idxs: torch.Tensor,
             extended_attention_mask: torch.Tensor,
             model: transformer_lens.HookedTransformer,
@@ -297,7 +303,6 @@ def prop_GPT(encoding_idxs: torch.Tensor,
             output_att_prob=False,
             set_irrel_to_mean=False,
             cached_pre_layer_acts: Optional[torch.Tensor] = None):
-    
     head_mask = [None] * len(model.blocks)
 
     # we have to do a "separate" forward pass for each ablation for which we want to perform decomposition
@@ -324,11 +329,14 @@ def prop_GPT(encoding_idxs: torch.Tensor,
             for source_node in ablation:
                 if source_node.layer_idx < earliest_layer_to_run:
                     earliest_layer_to_run = source_node.layer_idx
-
-        latest_layer_to_run = 0
-        for target_node in target_nodes:
-            if target_node.layer_idx > latest_layer_to_run:
-                latest_layer_to_run = target_node.layer_idx
+        if len(target_nodes) == 0:
+            # this allows us to calculate contribution of source node to logits with cached values
+            latest_layer_to_run = len(model.blocks) - 1
+        else:
+            latest_layer_to_run = 0
+            for target_node in target_nodes:
+                if target_node.layer_idx > latest_layer_to_run:
+                    latest_layer_to_run = target_node.layer_idx
         irrel = cached_pre_layer_acts[earliest_layer_to_run].repeat(len(ablation_list), 1, 1)
         rel = torch.zeros(irrel.size(), dtype = irrel.dtype, device = device)
                 
@@ -362,7 +370,6 @@ def prop_GPT(encoding_idxs: torch.Tensor,
 
     rel, irrel = prop_layer_norm(rel, irrel, GPTLayerNormWrapper(model.ln_final))
     rel_out, irrel_out = prop_GPT_unembed(rel, irrel, model.unembed)
-    
     out_decomps = []
     for ablation, batch_indices in ablation_dict.items():
         rel_vec = rel_out[batch_indices, :].detach().cpu().numpy()
@@ -405,13 +412,8 @@ def batch_run(prop_model_fn, ablation_list, num_at_time=64, n_layers=12):
 
     for b_no in range(n_batches):
         b_st = b_no * num_at_time
-<<<<<<< HEAD
-        b_end = min(b_st + num_at_time, n_source_lists)
-        batch_out_decomps, batch_target_decomps, _, _ = prop_model_fn(source_node_list[b_st: b_end])
-=======
         b_end = min(b_st + num_at_time, n_ablations)
-        batch_out_decomps, batch_target_decomps, _ = prop_model_fn(ablation_list[b_st: b_end])
->>>>>>> 6e109bd (Implement caching of early activations and early exit)
+        batch_out_decomps, batch_target_decomps, _, _ = prop_model_fn(ablation_list[b_st: b_end])
 
         out_decomps = out_decomps + batch_out_decomps
         target_decomps = [target_decomps[i] + batch_target_decomps[i] for i in range(n_layers)]
