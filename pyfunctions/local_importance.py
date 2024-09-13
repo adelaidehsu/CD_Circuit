@@ -1,132 +1,191 @@
 import os
 import numpy as np
+import collections
+import matplotlib
+import tqdm
+from IPython.core.display import display, HTML
 from methods.bag_of_ngrams.processing import cleanReports, cleanSplit, stripChars
 from pyfunctions.config import BASE_DIR
 from pyfunctions.general import extractListFromDic, readJson
 from pyfunctions.pathology import extract_synoptic, fixLabel, exclude_labels
-from pyfunctions.cdt_basics import comp_cd_scores_level_skip
+from pyfunctions.cdt_basic import comp_cd_scores_level_skip, get_encoding
 from sklearn import preprocessing
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoModel
 from transformers import BertTokenizer, BertForSequenceClassification
 from datasets import load_dataset
+from matplotlib.colors import LinearSegmentedColormap
+import torch
+import torch.nn.functional as F
+
+import shap
+import scipy as sp
+import lime
+from lime.lime_text import LimeTextExplainer, IndexedString, TextDomainMapper
+from pyfunctions._integrated_gradients import get_input_data, ig_attribute
+from captum.attr import (IntegratedGradients)
 
 ############ MAIN FUNCTIONS TO CALL ############
-def load_data(data_name, device, model_type):
-    if data_name == "pathology":
-        if model_type == "bert":
-            tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-        elif model_type == "pubmed_bert":
-            tokenizer = AutoTokenizer.from_pretrained("microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract")
+def load_data_and_model(data_name, model_type, device):
+    identifier = f'{data_name}_{model_type}'
+    if identifier == "pathology_bert":
+        tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
         data_path = os.path.join(BASE_DIR, "data/prostate.json")
         data, le_dict = load_path_data(data_path, tokenizer)
-    elif data_name == "sst2":
-        tokenizer = AutoTokenizer.from_pretrained("textattack/bert-base-uncased-SST-2")
-        data, le_dict = load_sst2_data()
-    elif data_name == "agnews":
-        tokenizer = AutoTokenizer.from_pretrained("textattack/bert-base-uncased-ag-news")
-        data, le_dict = load_agnews_data()
-    return data, le_dict, tokenizer
-
-def load_model(model_name, le_dict, device):
-    if model_name == "path_bert":
+        # load model
         model_path = os.path.join(BASE_DIR, "models/path/bert_PrimaryGleason")
         model_checkpoint_file = os.path.join(model_path, "save_output")
         model = load_path_model(model_checkpoint_file, le_dict)
-    elif model_name == "path_pubmed_bert":
+    elif identifier == "pathology_pubmed_bert":
+        tokenizer = AutoTokenizer.from_pretrained("microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract")
+        data_path = os.path.join(BASE_DIR, "data/prostate.json")
+        data, le_dict = load_path_data(data_path, tokenizer)
+        # load model
         model_path = os.path.join(BASE_DIR, "models/path/pubmed_bert_PrimaryGleason")
         model_checkpoint_file = os.path.join(model_path, "save_output")
         model = load_path_model(model_checkpoint_file, le_dict)
-    elif model_name == "sst2":
+    elif identifier == "sst2_bert":
+        tokenizer = AutoTokenizer.from_pretrained("textattack/bert-base-uncased-SST-2")
+        data, le_dict = load_sst2_data()
+        # load model
         model = AutoModelForSequenceClassification.from_pretrained("textattack/bert-base-uncased-SST-2")
-    elif model_name == "agnews":
+    elif identifier == "agnews_bert":
+        tokenizer = AutoTokenizer.from_pretrained("textattack/bert-base-uncased-ag-news")
+        data, le_dict = load_agnews_data()
+        # load model
         model = AutoModelForSequenceClassification.from_pretrained("textattack/bert-base-uncased-ag-news")
+        
     model = model.eval()
     model.to(device)
-    return model
+    return data, le_dict, tokenizer, model
 
-def run_local_importance(text, label, max_seq_len, model, tokenizer, le_dict, method, class_names, device):
-    tokens = tokenizer.convert_ids_to_tokens(tokenizer(text)["input_ids"])
-    intervals, words = compute_word_intervals(tokens)
-    if method == "CDT":
-        scores, irrel_scores = comp_cd_scores_level_skip(model, encoding, label, le_dict, device, max_seq_len = 512, level = 0, skip = 1, num_at_time = 64)
-    elif method == "lime":
-        scores = run_lime(text, class_names, model, words)
-    elif method == "shap":
-        scores = run_shap(text, shap_predictor, tokenizer, intervals)
+
+def run_local_importance(text, label, model, tokenizer, le_dict, device, max_seq_len, method, class_names, IG_interpretable_embeds, level=0, skip=1, num_at_time=64):
+    #tokens = tokenizer.convert_ids_to_tokens(tokenizer(text)["input_ids"])
+    #intervals, words = compute_word_intervals(tokens)
+    encoding = get_encoding(text, tokenizer, device, max_seq_len=max_seq_len)
+    toks = tokenizer.convert_ids_to_tokens([x for x in encoding['input_ids'][0] if x !=0 ])
+    intervals, words = compute_word_intervals(toks)
+    with torch.no_grad():
+        if method == "CDT":
+            scores, irrel_scores = comp_cd_scores_level_skip(model, encoding, label, le_dict, device, max_seq_len=max_seq_len, level=level, skip=skip, num_at_time=num_at_time)
+            visualize_cdt(scores, irrel_scores, intervals, words)
+        elif method == "lime":
+            # LIME has its own tokenizing scheme - split by spaces
+            scores, words = run_lime(text, class_names, model, tokenizer, device, label, le_dict, max_seq_len=max_seq_len)
+            visualize_common(scores, words, method)
+        elif method == "shap":
+            scores = run_shap(text, model, tokenizer, intervals, device, label, le_dict, max_seq_len=max_seq_len)
+            visualize_common(scores, words, method)
+        elif method == "IG":
+            scores = run_ig(text, model, tokenizer, intervals, device, label, le_dict, IG_interpretable_embeds, max_seq_len=max_seq_len)
+            visualize_common(scores, words, method)
+    return scores
 #################################################
 # IG
-def run_ig(text, label_idx):
+def run_ig(text, model, tokenizer, intervals, device, label, le_dict, IG_interpretable_embeds, max_seq_len):
+    def predict_forward_func(input_ids, token_type_ids=None,
+                         position_ids=None, attention_mask=None):
+        """Function passed to ig constructors"""
+        return model(inputs_embeds=input_ids,
+                     token_type_ids=token_type_ids,
+                     position_ids=position_ids,
+                     attention_mask=attention_mask)[0]
+    
     ig = IntegratedGradients(predict_forward_func)
-    if not \
-    type(model.get_input_embeddings()).__name__ == "InterpretableEmbeddingBase":
-        interpretable_embedding1, interpretable_embedding2, interpretable_embedding3 = configure_interpretable_embeddings()
+    interpretable_embedding1, interpretable_embedding2, interpretable_embedding3 = IG_interpretable_embeds
+    #model.to(device)
+    input_data, input_data_embed = get_input_data(interpretable_embedding1, interpretable_embedding2, interpretable_embedding3,
+                                                  text, tokenizer, max_seq_len, device)
 
-    model.to(device)
-
-    input_data, input_data_embed = get_input_data(text)
-    attributions, approximation_error = ig_attribute(ig, label_idx, input_data_embed)
+    attributions, approximation_error = ig_attribute(ig, int(le_dict[label]), input_data_embed)
     scores = attributions[0].detach().cpu().numpy().squeeze().sum(1)
 
-    # Remove interpratable embedding layer used by ig attribution
-    remove_interpretable_embeddings(interpretable_embedding1,
-                                  interpretable_embedding2,
-                                  interpretable_embedding3)
-
-    tokens = tokenizer.convert_ids_to_tokens(tokenizer(text)["input_ids"])
-    intervals, words = compute_word_intervals(tokens)
+    #tokens = tokenizer.convert_ids_to_tokens(tokenizer(text)["input_ids"])
+    #intervals, words = compute_word_intervals(tokens)
     word_scores = combine_token_scores(intervals, scores)
-
-    return words, word_scores
-
-# LIME
-def lime_predictor(texts, model, tokenizer, device):
-    outputs = model(**tokenizer(texts, return_tensors="pt", padding=True).to(device))
-    tensor_logits = outputs[0]
-    probas = F.softmax(tensor_logits).detach().cpu().numpy()
-    return probas
-
-def run_lime(text, class_names, lime_predictor, words):
-    explainer = LimeTextExplainer(class_names=class_names)
-    exp = explainer.explain_instance(text, lime_predictor, num_features=20, num_samples=2000)
-    scores = exp.as_list()
-    score_dict = {}
-
-    for t in scores:
-        score_dict[t[0]] = t[1]
-
-    word_scores = np.zeros(len(words))
-    for i, w in enumerate(words):
-        if w in score_dict:
-            word_scores[i] = score_dict[w]
 
     return word_scores
 
 # SHAP
-def shap_predictor(texts, model, device, max_seq_len):
-    model.to(device)
-    tv = torch.tensor(
-        [
-            tokenizer.encode(v, padding="max_length", max_length=max_seq_len, truncation=True) for v in texts
-        ]
-    ).to(device)
+def run_shap(text, model, tokenizer, intervals, device, label, le_dict, max_seq_len):
+    def shap_predictor(texts):
+        tv = torch.tensor(
+            [
+                tokenizer.encode(v, padding="max_length", max_length=max_seq_len, truncation=True) for v in texts
+            ]
+        ).to(device)
 
-    outputs = model(tv)[0].detach().cpu().numpy()
-    scores = (np.exp(outputs).T / np.exp(outputs).sum(-1)).T
-    val = sp.special.logit(scores[:, 1])  # use one vs rest logit units-- positive -> TODO: enable this for multi class
+        outputs = model(tv)[0].detach().cpu().numpy()
+        scores = (np.exp(outputs).T / np.exp(outputs).sum(-1)).T
+        val = sp.special.logit(scores[:, le_dict[label]])
+        return val
 
-    return val
-
-def run_shap(text, shap_predictor, tokenizer, intervals):
     explainer = shap.Explainer(shap_predictor, tokenizer)
     scores = explainer([text], fixed_context=1)
     word_scores = combine_token_scores(intervals, scores.values[0])
-
     return word_scores
 
+# LIME
+def run_lime(text, class_names, model, tokenizer, device, label, le_dict, max_seq_len):
+    def lime_predictor(texts):
+        batch_size = 128
+        if len(texts) % batch_size == 0:
+            max_epochs = len(texts) // batch_size
+        else:
+            max_epochs = len(texts) // batch_size + 1
+
+        total_probas = []
+        for L in tqdm.tqdm(range(max_epochs), desc="LIME Batch Processing..."):
+            start = batch_size*L
+            end = batch_size*(L+1) if len(texts) > batch_size*(L+1) else len(texts)
+            outputs = model(**tokenizer(texts[start:end], add_special_tokens=True, 
+                             max_length=max_seq_len,
+                             truncation=True, 
+                             padding = "max_length", 
+                             return_attention_mask=True, 
+                             pad_to_max_length=True, return_tensors="pt").to(device))
+            tensor_logits = outputs[0]
+            probas = F.softmax(tensor_logits).detach().cpu().numpy()
+            total_probas.extend(probas)
+        total_probas = np.stack(total_probas) #[num_samples, num_classes]
+        return total_probas
+
+    explainer = LimeTextExplainer(class_names=class_names, bow=False, split_expression=' ')
+    indexed_text = IndexedString(text, bow=False, split_expression=' ')
+    vocab_size = indexed_text.num_words()
+    exp = explainer.explain_instance(text, lime_predictor, num_features=vocab_size, labels=[le_dict[label]])
+
+    scores = exp.local_exp[le_dict[label]]
+    mapper = TextDomainMapper(indexed_text)
+    combine_to_weight = mapper.map_exp_ids(scores, positions=True) #[(word_pos, weight)]
+    
+    pos2word, pos2weight = {}, {}
+    for combine, w in combine_to_weight:
+        tag = combine.find('_')
+        word = combine[:tag]
+        pos = int(combine[tag+1:])
+        pos2word[pos] = word
+        pos2weight[pos] = w
+
+    od = collections.OrderedDict(sorted(pos2word.items()))
+    reconstructed_s = ' '.join([item[1] for item in od.items()])
+    assert(reconstructed_s == text)
+    
+    scores = [pos2weight[pos] for pos in od.keys()]
+    words = [pos2word[pos] for pos in od.keys()]
+
+    return scores, words
+
+def visualize_common(word_scores, words, method):
+    assert(len(word_scores) == len(words))
+    normalized = normalize_word_scores(word_scores)
+    print(f'Viz {method}: ')
+    display_colored_html(words, normalized)
+
 # visualization helper
-def visualize_cdt(scores, irrel_scores, tokenizer, encoding):
-    toks = tokenizer.convert_ids_to_tokens([x for x in encoding['input_ids'][0] if x !=0 ])
-    intervals, words = compute_word_intervals(toks)
+def visualize_cdt(scores, irrel_scores, intervals, words):
+    #toks = tokenizer.convert_ids_to_tokens([x for x in encoding['input_ids'][0] if x !=0 ])
+    #intervals, words = compute_word_intervals(toks)
 
     word_scores = combine_token_scores(intervals, scores)
     irrel_word_scores = combine_token_scores(intervals, irrel_scores) # for ablation purpose
@@ -134,8 +193,11 @@ def visualize_cdt(scores, irrel_scores, tokenizer, encoding):
     normalized = normalize_word_scores(word_scores)
     irrel_normalized = normalize_word_scores(irrel_word_scores)
     
+    print("Viz rel: ")
     display_colored_html(words, normalized)
+    print("Viz irrel: ")
     display_colored_html(words, irrel_normalized)
+    print("Viz rel-irrel: ")
     display_colored_html(words, normalized - irrel_normalized)
     
 def display_colored_html(words, scores):
@@ -237,21 +299,21 @@ def load_path_data(data_path, tokenizer):
     data = cleanSplit(data, stripChars)
     data['dev_test'] = cleanReports(data['dev_test'], stripChars)
     data = fixLabel(data)
-    #print("Processing train data...")
-    #train_documents = [extract_synoptic(patient['document'].lower(), tokenizer) for patient in data['train']]
+    print("Processing train data...")
+    train_documents = [extract_synoptic(patient['document'].lower(), tokenizer) for patient in data['train']]
     print("Processing val data...")
     val_documents = [extract_synoptic(patient['document'].lower(), tokenizer) for patient in data['val']]
-    #print("Processing test data...")
-    #test_documents = [extract_synoptic(patient['document'].lower(), tokenizer) for patient in data['test']]
+    print("Processing test data...")
+    test_documents = [extract_synoptic(patient['document'].lower(), tokenizer) for patient in data['test']]
     
     # Create datasets
     train_labels = [patient['labels']['PrimaryGleason'] for patient in data['train']]
     val_labels = [patient['labels']['PrimaryGleason'] for patient in data['val']]
     test_labels = [patient['labels']['PrimaryGleason'] for patient in data['test']]
 
-    #train_documents, train_labels = exclude_labels(train_documents, train_labels)
+    train_documents, train_labels = exclude_labels(train_documents, train_labels)
     val_documents, val_labels = exclude_labels(val_documents, val_labels)
-    #test_documents, test_labels = exclude_labels(test_documents, test_labels)
+    test_documents, test_labels = exclude_labels(test_documents, test_labels)
 
     le = preprocessing.LabelEncoder()
     le.fit(train_labels)
@@ -269,7 +331,7 @@ def load_path_data(data_path, tokenizer):
     
     #docs_dict = {'train': train_documents, 'val': val_documents, 'test': test_documents}
     #labels_dict = {'train': train_labels, 'val': val_labels, 'test': test_labels}
-    data_dict = {'docs': val_documents, 'labels': val_labels}
+    data_dict = {'docs': test_documents, 'labels': test_labels}
     
     return data_dict, le_dict
 

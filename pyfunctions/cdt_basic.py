@@ -20,10 +20,10 @@ def normalize_rel_irrel(rel, irrel):
     irrel[irrel_mask] = tot[irrel_mask]
     irrel[rel_mask] = 0
 
-def get_encoding(text, tokenizer, device):
+def get_encoding(text, tokenizer, device, max_seq_len=512):
     encoding = tokenizer.encode_plus(text, 
                                  add_special_tokens=True, 
-                                 max_length=512,
+                                 max_length=max_seq_len,
                                  truncation=True, 
                                  padding = "max_length", 
                                  return_attention_mask=True, 
@@ -138,7 +138,7 @@ def prop_pooler(rel, irrel, pooler_module):
     
     return rel_out, irrel_out
 
-def prop_classifier_model(encoding, rel_ind_list, model, device, att_list = None):
+def prop_classifier_model(encoding, rel_ind_list, model, device, max_seq_len, att_list = None):
     embedding_output = get_embeddings_bert(encoding, model)
     input_shape = encoding['input_ids'].size()
     extended_attention_mask = get_extended_attention_mask(attention_mask = encoding['attention_mask'], 
@@ -156,8 +156,7 @@ def prop_classifier_model(encoding, rel_ind_list, model, device, att_list = None
     
     for i in range(tot_rel):
         rel_inds = rel_ind_list[i]
-        # Hardcoded length at the moment
-        mask = np.isin(np.arange(512), rel_inds)
+        mask = np.isin(np.arange(max_seq_len), rel_inds)
 
         rel[i, mask, :] = embedding_output[0, mask, :]
         irrel[i, ~mask, :] = embedding_output[0, ~mask, :]
@@ -374,7 +373,7 @@ def prop_encoder_from_level(rel, irrel, attention_mask, head_mask, encoder_modul
     
     return rel_enc, irrel_enc
 
-def prop_classifier_model_from_level(encoding, rel_ind_list, model, device, max_seq_len = 512, level = 0, att_list = None):
+def prop_classifier_model_from_level(encoding, rel_ind_list, model, device, max_seq_len, level = 0, att_list = None):
     embedding_output = get_embeddings_bert(encoding, model)
     input_shape = encoding['input_ids'].size()
     extended_attention_mask = get_extended_attention_mask(attention_mask = encoding['attention_mask'], 
@@ -401,7 +400,6 @@ def prop_classifier_model_from_level(encoding, rel_ind_list, model, device, max_
     
     for i in range(tot_rel):
         rel_inds = rel_ind_list[i]
-        # Hardcoded length at the moment
         mask = np.isin(np.arange(max_seq_len), rel_inds)
 
         rel[i, mask, :] = embedding_output[0, mask, :]
@@ -416,7 +414,7 @@ def prop_classifier_model_from_level(encoding, rel_ind_list, model, device, max_
     
     return rel_out, irrel_out
 
-def comp_cd_scores_level_skip(model, encoding, label, le_dict, device, max_seq_len = 512, level = 0, skip = 1, num_at_time = 64):
+def comp_cd_scores_level_skip(model, encoding, label, le_dict, device, max_seq_len, level = 0, skip = 1, num_at_time = 64):
 
     closest_competitor, lab_index = get_closest_competitor(model, encoding, label, le_dict)
     
