@@ -57,21 +57,22 @@ def set_rel_at_source_nodes(rel, irrel, ablation_dict, layer_mean_acts, layer_id
                 else:
                     rel[batch_indices, sq, head, :] = irrel[batch_indices, sq, head, :] + rel[batch_indices, sq, head, :]
                     irrel[batch_indices, sq, head, :] = 0
-    else:     
-        for ablation in ablation_dict:
-            for source_node in ablation:
-                source_node_layer_idx = entry[0]
-                if source_node_layer_idx != layer_idx:
-                    continue
-                sq = entry[1]
-                head = entry[2]
+    else:
+        # for ablation in ablation_dict: # Temporary. BERT implementation has removed batching so only one ablation is done at a time here.
+        ablation = ablation_dict
+        for source_node in ablation:
+            source_node_layer_idx = source_node[0]
+            if source_node_layer_idx != layer_idx:
+                continue
+            sq = source_node[1]
+            head = source_node[2]
 
-                if set_irrel_to_mean:
-                    rel[:, sq, head, :] = irrel[:, sq, head, :] + rel[:, sq, head, :] - torch.Tensor(layer_mean_acts[:, sq, head, :]).to(device)
-                    irrel[:, sq, head, :] = torch.Tensor(layer_mean_acts[:, sq, head, :]).to(device)
-                else:
-                    rel[:, sq, head, :] = irrel[:, sq, head, :] + rel[:, sq, head, :]
-                    irrel[:, sq, head, :] = 0
+            if set_irrel_to_mean:
+                rel[:, sq, head, :] = irrel[:, sq, head, :] + rel[:, sq, head, :] - torch.Tensor(layer_mean_acts[:, sq, head, :]).to(device)
+                irrel[:, sq, head, :] = torch.Tensor(layer_mean_acts[:, sq, head, :]).to(device)
+            else:
+                rel[:, sq, head, :] = irrel[:, sq, head, :] + rel[:, sq, head, :]
+                irrel[:, sq, head, :] = 0
 
     
     rel = reshape_concatenate_attention_heads(rel, sa_module)

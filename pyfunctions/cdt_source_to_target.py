@@ -22,24 +22,29 @@ def calculate_contributions_new(rel, irrel, ablation_dict, target_nodes, level, 
     return target_decomps
 
 # Deprecated. Try to transition to calculate_contributions_new, which should make results easier to parse, and supports batch dimension.
-def calculate_contributions(rel, irrel, ablations, target_nodes, level, sa_module, device):
+# Note: this function doesn't seem to handle more than one source node?
+def calculate_contributions(rel, irrel, source_node_list, target_nodes, level, sa_module, device):
     rel = reshape_separate_attention_heads(rel, sa_module)
     irrel = reshape_separate_attention_heads(irrel, sa_module)
     target_nodes_at_level = [node for node in target_nodes if node[0] == level]
     target_decomps = []
 
-    for s_ind, _ in enumerate(ablations):
-        out_shape = (len(target_nodes_at_level), sa_module.attention_head_size)
-        
-        rel_st = torch.zeros(out_shape, dtype = rel.dtype, device = device)
-        irrel_st = torch.zeros(out_shape, dtype = rel.dtype, device = device)
+    #for s_ind, _ in enumerate(source_node_list):
+    out_shape = (len(target_nodes_at_level), sa_module.attention_head_size)
 
     rel_st = torch.zeros(out_shape, dtype = rel.dtype, device = device)
     irrel_st = torch.zeros(out_shape, dtype = rel.dtype, device = device)
 
-        target_decomps.append((rel_st.detach().cpu().numpy(), irrel_st.detach().cpu().numpy()))
-    # currently returns list indexed by source node of (rel, irrel), rel indexed by t
+    for t_ind, t in enumerate(target_nodes_at_level):
+        t_pos = t[1]
+        t_head = t[2]
+        rel_st[t_ind, :] = rel[:, t_pos, t_head, :]
+        irrel_st[t_ind, :] = irrel[:, t_pos, t_head, :]
+
+    target_decomps.append((rel_st.detach().cpu().numpy(), irrel_st.detach().cpu().numpy()))
+    
     return target_decomps
+
 
 # This function handles what is usually called the attention mechanism, up to the point
 # where the softmax'd attention pattern is multiplied by the value vectors.
@@ -154,7 +159,7 @@ def prop_BERT_layer_hh(rel, irrel, attention_mask, head_mask,
     
     return rel_out, irrel_out, target_decomps, returned_att_probs
 
-def prop_GPT_layer_hh(rel, irrel, attention_mask, head_mask, 
+def prop_GPT_layer(rel, irrel, attention_mask, head_mask, 
                   ablation_dict, target_nodes, level, layer_mean_acts,
                   layer_module, device, att_probs = None, output_att_prob=False, set_irrel_to_mean=False):
     # TODO: there should be some kind of casework for the folded layernorm,
@@ -198,7 +203,12 @@ def prop_GPT_layer_hh(rel, irrel, attention_mask, head_mask,
 
     return rel_out, irrel_out, layer_target_decomps, returned_att_probs
 
-def prop_BERT_hh(encoding, model, ablation_list, target_nodes, device,
+# In order to get the contribution of a set of source nodes to a set of target nodes, pass in both, and look at return val target_decomps.
+# In order to get the contribute of a set of source nodes to the logits, pass in source nodes, and look at return val out_decomps.
+# In order to optimize calculation speed by using cached values for the points before the first source node, pass in cached_pre_layer_acts.
+# Note that this will also end the calculation after the last target node is reached, which likely makes return val out_decomps meaningless.
+# To avoid this behavior, pass in empty target nodes (e.g, if you want to calculate contribution of source node to logits).
+def prop_BERT_hh(encoding, model, source_node_list, target_nodes, device,
                              mean_acts=None, output_att_prob=False, set_irrel_to_mean=False, cached_pre_layer_acts=None):
     embedding_output = get_embeddings_bert(encoding, model)
     
@@ -229,17 +239,19 @@ def prop_BERT_hh(encoding, model, ablation_list, target_nodes, device,
             for source_node in source_node_batch:
                 if source_node[0] < earliest_layer_to_run:
                     earliest_layer_to_run = source_node[0]
-
-            latest_layer_to_run = 0 
-            for target_node in target_nodes:
-                if target_node[0] > latest_layer_to_run:
-                    latest_layer_to_run = target_node[0]
-                irrel = cached_pre_layer_acts[earliest_layer_to_run]                                                                                         
-                rel = torch.zeros(irrel.size(), dtype = irrel.dtype, device = device)
+            if len(target_nodes) == 0:
+                # this allows us to calculate contribution of source node to logits with cached values
+                latest_layer_to_run = len(encoder_module.layer) - 1
+            else:
+                latest_layer_to_run = 0 
+                for target_node in target_nodes:
+                    if target_node[0] > latest_layer_to_run:
+                        latest_layer_to_run = target_node[0]
+            irrel = cached_pre_layer_acts[earliest_layer_to_run]                                                                                         
+            rel = torch.zeros(irrel.size(), dtype = irrel.dtype, device = device)
 
 
         batch_target_decomps = []
-        
         for i in range(earliest_layer_to_run, latest_layer_to_run + 1):
             if cached_pre_layer_acts is None:
                 pre_layer_acts.append(rel + irrel)
@@ -354,7 +366,7 @@ def prop_GPT(encoding_idxs: torch.Tensor,
         else:
             layer_mean_acts = None
             
-        rel, irrel, layer_target_decomps, returned_att_probs = prop_GPT_layer_hh(rel, irrel, extended_attention_mask, 
+        rel, irrel, layer_target_decomps, returned_att_probs = prop_GPT_layer(rel, irrel, extended_attention_mask, 
                                                                                  layer_head_mask, ablation_dict, 
                                                                                  target_nodes, i, 
                                                                                  layer_mean_acts,
