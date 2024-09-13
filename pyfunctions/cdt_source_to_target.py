@@ -395,10 +395,12 @@ def batch_run_new(prop_model_fn, ablation_list, num_at_time=64, n_layers=12):
     for b_no in range(n_batches):
         b_st = b_no * num_at_time
         b_end = min(b_st + num_at_time, n_ablations)
+        print('Running inputs %d to %d (of %d)' % (b_st, b_end, n_ablations))
         batch_out_decomps, batch_target_decomps, _, _ = prop_model_fn(ablation_list[b_st: b_end])
 
         out_decomps += batch_out_decomps
         target_decomps += batch_target_decomps
+    
     
     return out_decomps, target_decomps
 
