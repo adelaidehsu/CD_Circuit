@@ -1,4 +1,5 @@
 from pyfunctions.cdt_basic import *
+from pyfunctions.wrappers import AblationSet, Node
 
 def reshape_separate_attention_heads(context_layer, sa_module):
     new_shape = context_layer.size()[:-1] + (sa_module.num_attention_heads, sa_module.attention_head_size)
@@ -30,27 +31,48 @@ def prop_self_attention_patched(rel, irrel, attention_mask,
         return rel_context, irrel_context, None
 
 
-def set_rel_at_source_nodes(rel, irrel, source_nodes, layer_mean_acts, sa_module, set_irrel_to_mean, device):
+def set_rel_at_source_nodes(rel, irrel, ablation_dict, layer_mean_acts, layer_idx, sa_module, set_irrel_to_mean, device):
+
     if set_irrel_to_mean and layer_mean_acts is None:
         print("Tried to set decomposition of source node using mean method but no mean activation tensor provided; returning immediately \
-               (likely the resuling decomposition will be meaningless)")
+               (likely the resulting decomposition will be meaningless)")
     rel = reshape_separate_attention_heads(rel, sa_module)
     irrel = reshape_separate_attention_heads(irrel, sa_module)
     
     if layer_mean_acts is not None:
         layer_mean_acts = reshape_separate_attention_heads(layer_mean_acts, sa_module)
         layer_mean_acts = layer_mean_acts[None, :, :, :] # add on a batch dimension
-        
-    for entry in source_nodes:
-        pos = entry[1]
-        att_head = entry[2]
-        
-        if set_irrel_to_mean:
-            rel[:, pos, att_head, :] = irrel[:, pos, att_head, :] + rel[:, pos, att_head, :] - torch.Tensor(layer_mean_acts[:, pos, att_head, :]).to(device)
-            irrel[:, pos, att_head, :] = torch.Tensor(layer_mean_acts[:, pos, att_head, :]).to(device)
-        else:
-            rel[:, pos, att_head, :] = irrel[:, pos, att_head, :] + rel[:, pos, att_head, :]
-            irrel[:, pos, att_head, :] = 0
+    
+    # temporary, for transitioning from list of source nodes to dict which maps source nodes to batch indices
+    if isinstance(ablation_dict, dict):
+        for ablation, batch_indices in ablation_dict.items():
+            for source_node in ablation:
+                if source_node.layer_idx != layer_idx:
+                    continue
+                sq = source_node.sequence_idx
+                head = source_node.attn_head_idx
+                if set_irrel_to_mean:
+                    rel[batch_indices, sq, head, :] = irrel[batch_indices, sq, head, :] + rel[batch_indices, sq, head, :] - torch.Tensor(layer_mean_acts[:, sq, head, :]).to(device)
+                    irrel[batch_indices, sq, head, :] = torch.Tensor(layer_mean_acts[:, sq, head, :]).to(device)
+                else:
+                    rel[batch_indices, sq, head, :] = irrel[batch_indices, sq, head, :] + rel[batch_indices, sq, head, :]
+                    irrel[batch_indices, sq, head, :] = 0
+    else:
+        # for ablation in ablation_dict: # Temporary. BERT implementation has removed batching so only one ablation is done at a time here.
+        ablation = ablation_dict
+        for source_node in ablation:
+            source_node_layer_idx = source_node[0]
+            if source_node_layer_idx != layer_idx:
+                continue
+            sq = source_node[1]
+            head = source_node[2]
+
+            if set_irrel_to_mean:
+                rel[:, sq, head, :] = irrel[:, sq, head, :] + rel[:, sq, head, :] - torch.Tensor(layer_mean_acts[:, sq, head, :]).to(device)
+                irrel[:, sq, head, :] = torch.Tensor(layer_mean_acts[:, sq, head, :]).to(device)
+            else:
+                rel[:, sq, head, :] = irrel[:, sq, head, :] + rel[:, sq, head, :]
+                irrel[:, sq, head, :] = 0
 
     
     rel = reshape_concatenate_attention_heads(rel, sa_module)
@@ -161,8 +183,8 @@ def prop_encoder_patched(rel, irrel, attention_mask, head_mask, encoder_module, 
 def prop_classifier_model_patched(encoding, model, device, source_nodes=[], mean_acts=None, 
                                   att_list = None, output_att_prob=False, output_context=False,
                                   set_irrel_to_mean=False):
-    # source_nodes: attention heads to patch. format: [(level, pos, head)]
-    # level: 0-11, pos: 0-511, head: 0-11
+    # source_nodes: attention heads to patch. format: [(level, sequence_position, head)]
+    # level: 0-11, sequence_position: 0-511, head: 0-11
     # rel_out: the contribution of the source_nodes
     # irrel_out: the contribution of everything else``
     

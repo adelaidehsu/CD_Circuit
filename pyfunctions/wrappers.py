@@ -1,4 +1,7 @@
 from fancy_einsum import einsum
+from typing import NamedTuple
+import torch
+from dataclasses import dataclass
 
 '''
 These wrapper classes are used to make the GPT modules work with code intended for a HuggingFace
@@ -88,12 +91,59 @@ class GPTAttentionWrapper():
 Helper classes for readability.
 '''
 
+'''
 class OutputDecomposition:
-    def __init__(self, rel, irrel):
+    def __init__(self, source_node, rel, irrel):
+        self.source_node = source_node
         self.rel = rel
         self.irrel = irrel
+'''
+class Node(NamedTuple):
+    layer_idx: int
+    sequence_idx: int
+    attn_head_idx: int
 
-class TargetDecomposition:
-    def __init__(self, rel, irrel):
-        self.rel = rel
-        self.irrel = irrel        
+# "ablation" isn't the right thing to call this, exactly; it's the set of nodes
+# you want to decompose into (rel, irrel) in the forward pass
+# however, it performs a function analogous to ablation in other interpretability techniques,
+# in that we can determine the importance of these nodes
+
+'''
+class AblationSet:
+    def __init__(self, nodes: list[Node]):
+        self.nodes = nodes
+'''
+type AblationSet = tuple[Node]
+
+
+class OutputDecomposition(NamedTuple):
+    ablation_set: AblationSet
+    rel: torch.Tensor
+    irrel: torch.Tensor
+
+@dataclass
+class TargetNodeDecompositionList:
+    ablation_set: AblationSet
+    target_nodes: list[Node]
+    rels: list[torch.Tensor]
+    irrels: list[torch.Tensor]
+    
+    def __init__(self, ablation_set: AblationSet):
+        self.ablation_set = ablation_set
+        self.target_nodes = []
+        self.rels = []
+        self.irrels = []
+
+    def append(self, target_node, rel, irrel):
+        self.target_nodes.append(target_node)
+        self.rels.append(rel)
+        self.irrels.append(irrel)
+
+    # hopefully this doesn't slow things down too much with a bunch of reallocations
+    def __add__(self, other):
+        assert self.ablation_set == other.ablation_set
+        s = TargetNodeDecompositionList(self.ablation_set)
+        s.target_nodes = self.target_nodes + other.target_nodes
+        s.rels = self.rels + other.rels
+        s.irrels = self.irrels + other.irrels
+        return s
