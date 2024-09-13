@@ -6,7 +6,7 @@ from typing import Optional
 from pyfunctions.cdt_from_source_nodes import *
 from pyfunctions.wrappers import GPTAttentionWrapper, GPTLayerNormWrapper, OutputDecomposition, TargetNodeDecompositionList, AblationSet, Node
 
-def calculate_contributions_new(rel, irrel, ablation_dict, target_nodes, level, sa_module, device):
+def calculate_contributions(rel, irrel, ablation_dict, target_nodes, level, sa_module, device):
     rel = reshape_separate_attention_heads(rel, sa_module)
     irrel = reshape_separate_attention_heads(irrel, sa_module)
     target_nodes_at_level = [node for node in target_nodes if node[0] == level]
@@ -19,30 +19,6 @@ def calculate_contributions_new(rel, irrel, ablation_dict, target_nodes, level, 
             target_decomps_for_ablation.append(t, rel[batch_indices, t.sequence_idx, t.attn_head_idx, :],
                                                 irrel[batch_indices, t.sequence_idx, t.attn_head_idx, :])
         target_decomps.append(target_decomps_for_ablation)
-    return target_decomps
-
-# Deprecated. Try to transition to calculate_contributions_new, which should make results easier to parse, and supports batch dimension.
-# Note: this function doesn't seem to handle more than one source node?
-def calculate_contributions(rel, irrel, source_node_list, target_nodes, level, sa_module, device):
-    rel = reshape_separate_attention_heads(rel, sa_module)
-    irrel = reshape_separate_attention_heads(irrel, sa_module)
-    target_nodes_at_level = [node for node in target_nodes if node[0] == level]
-    target_decomps = []
-
-    #for s_ind, _ in enumerate(source_node_list):
-    out_shape = (len(target_nodes_at_level), sa_module.attention_head_size)
-
-    rel_st = torch.zeros(out_shape, dtype = rel.dtype, device = device)
-    irrel_st = torch.zeros(out_shape, dtype = rel.dtype, device = device)
-
-    for t_ind, t in enumerate(target_nodes_at_level):
-        t_pos = t[1]
-        t_head = t[2]
-        rel_st[t_ind, :] = rel[:, t_pos, t_head, :]
-        irrel_st[t_ind, :] = irrel[:, t_pos, t_head, :]
-
-    target_decomps.append((rel_st.detach().cpu().numpy(), irrel_st.detach().cpu().numpy()))
-    
     return target_decomps
 
 
@@ -123,7 +99,16 @@ def prop_BERT_attention_hh(rel, irrel, attention_mask,
     #print((rel_out+irrel_out).all() == tmp.all()) #passed
     
     return rel_out, irrel_out, target_decomps, returned_att_probs
-
+'''
+prop_BERT_layer_hh(rel, irrel, extended_attention_mask, 
+                                                                                    layer_head_mask,
+                                                                                    target_nodes, i, 
+                                                                                    layer_mean_acts,
+                                                                                    layer_module, 
+                                                                                    device,
+                                                                                    att_probs, output_att_prob,
+                                                                                    set_irrel_to_mean=set_irrel_to_mean)
+                                                                                    '''
 def prop_BERT_layer_hh(rel, irrel, attention_mask, head_mask, 
                   ablation_list, target_nodes, level, layer_mean_acts,
                   layer_module, device, att_probs = None, output_att_prob=False, set_irrel_to_mean=False):
@@ -208,11 +193,17 @@ def prop_GPT_layer(rel, irrel, attention_mask, head_mask,
 # In order to optimize calculation speed by using cached values for the points before the first source node, pass in cached_pre_layer_acts.
 # Note that this will also end the calculation after the last target node is reached, which likely makes return val out_decomps meaningless.
 # To avoid this behavior, pass in empty target nodes (e.g, if you want to calculate contribution of source node to logits).
-def prop_BERT_hh(encoding, model, source_node_list, target_nodes, device,
-                             mean_acts=None, output_att_prob=False, set_irrel_to_mean=False, cached_pre_layer_acts=None):
-    embedding_output = get_embeddings_bert(encoding, model)
-    
-    input_shape = encoding['input_ids'].size()
+
+def prop_BERT_hh(encoding,
+                model,
+                ablation_list: list[AblationSet],
+                target_nodes: list[Node],
+                device,
+                mean_acts: Optional[torch.Tensor] = None,
+                output_att_prob=False,
+                set_irrel_to_mean=False,
+                cached_pre_layer_acts: Optional[torch.Tensor] = None):
+    input_shape = encoding.input_ids.size()
     extended_attention_mask = get_extended_attention_mask(encoding.attention_mask, 
                                                             input_shape, 
                                                             model,
@@ -221,80 +212,80 @@ def prop_BERT_hh(encoding, model, source_node_list, target_nodes, device,
     head_mask = [None] * model.bert.config.num_hidden_layers
     encoder_module = model.bert.encoder
 
-    target_decomps = []
+    # we have to do a "separate" forward pass for each ablation for which we want to perform decomposition
+    # so unroll the source nodes along the batch dimension, but keep track of which
+    # "examples" belong to which source nodes
+    actual_batch_size = encoding.input_ids.size()[0]
+    ablation_dict = {}
+    start_batch_idx = 0
+    for ablation in ablation_list:
+        ablation_dict[ablation] = list(range(start_batch_idx, start_batch_idx + actual_batch_size))
+        start_batch_idx += actual_batch_size
+
+    target_decomps = [TargetNodeDecompositionList(x) for x in ablation_list]
     att_probs_lst = []
-    out_decomps = []
-    # source_node_list should be a List[List], sotring batches of source nodes to ablate
-    for source_node_batch in source_node_list:
 
-        if cached_pre_layer_acts is None:
-            pre_layer_acts = []
-            earliest_layer_to_run = 0 
-            latest_layer_to_run = len(encoder_module.layer) - 1 
-            irrel = get_embeddings_bert(encoding, model)
-            rel = torch.zeros(irrel.size(), dtype = irrel.dtype, device = device)
+    if cached_pre_layer_acts is None:
+        pre_layer_acts = []
+        earliest_layer_to_run = 0 
+        latest_layer_to_run = len(encoder_module.layer) - 1 
+        irrel = get_embeddings_bert(encoding, model).repeat(len(ablation_list), 1, 1)
+        rel = torch.zeros(irrel.size(), dtype = irrel.dtype, device = device)
+    else:
+        pre_layer_acts = None
+        earliest_layer_to_run = len(encoder_module.layer)
+        for ablation in ablation_list:
+            for source_node in ablation:
+                if source_node.layer_idx < earliest_layer_to_run:
+                    earliest_layer_to_run = source_node.layer_idx
+        if len(target_nodes) == 0:
+            # this allows us to calculate contribution of source node to logits with cached values
+            latest_layer_to_run = len(encoder_module.layer) - 1
         else:
-            pre_layer_acts = None
-            earliest_layer_to_run = len(encoder_module.layer)
-            for source_node in source_node_batch:
-                if source_node[0] < earliest_layer_to_run:
-                    earliest_layer_to_run = source_node[0]
-            if len(target_nodes) == 0:
-                # this allows us to calculate contribution of source node to logits with cached values
-                latest_layer_to_run = len(encoder_module.layer) - 1
-            else:
-                latest_layer_to_run = 0 
-                for target_node in target_nodes:
-                    if target_node[0] > latest_layer_to_run:
-                        latest_layer_to_run = target_node[0]
-            irrel = cached_pre_layer_acts[earliest_layer_to_run]                                                                                         
-            rel = torch.zeros(irrel.size(), dtype = irrel.dtype, device = device)
-
-
-        batch_target_decomps = []
-        for i in range(earliest_layer_to_run, latest_layer_to_run + 1):
-            if cached_pre_layer_acts is None:
-                pre_layer_acts.append(rel + irrel)
-            layer_module = encoder_module.layer[i]
-            # select source nodes on layer i
-            layer_source_node_list = [x for x in source_node_batch if x[0] == i]
-
-            layer_head_mask = head_mask[i]
-            att_probs = None
-
-            if mean_acts is not None:
-                layer_mean_acts = mean_acts[i] #[512, 12, 64]
-            else:
-                layer_mean_acts = None
-
-            rel_n, irrel_n, layer_target_decomps, returned_att_probs = prop_BERT_layer_hh(rel, irrel, extended_attention_mask, 
-                                                                                     layer_head_mask, layer_source_node_list, # only ablate source node on this layer
-                                                                                     target_nodes, i, 
-                                                                                     layer_mean_acts,
-                                                                                     layer_module, 
-                                                                                     device,
-                                                                                     att_probs, output_att_prob,
-                                                                                     set_irrel_to_mean=set_irrel_to_mean)
-            #print(layer_module(rel+irrel)[0].all() == (rel_n+irrel_n).all()) #passed
-            #target_decomps.append(layer_target_decomps)
-            batch_target_decomps.extend(layer_target_decomps)
-            
-            normalize_rel_irrel(rel_n, irrel_n)
-            rel, irrel = rel_n, irrel_n
-
-            if output_att_prob:
-                att_probs_lst.append(returned_att_probs.squeeze(0))
-
-        rel_pool, irrel_pool = prop_pooler(rel, irrel, model.bert.pooler)
-        rel_out, irrel_out = prop_linear(rel_pool, irrel_pool, model.classifier)
+            latest_layer_to_run = 0 
+            for target_node in target_nodes:
+                if target_node.layer_idx > latest_layer_to_run:
+                    latest_layer_to_run = target_node.layer_idx
+        irrel = cached_pre_layer_acts[earliest_layer_to_run].repeat(len(ablation_list), 1, 1)                                                                                  
+        rel = torch.zeros(irrel.size(), dtype = irrel.dtype, device = device)
     
-    
+    for i in range(earliest_layer_to_run, latest_layer_to_run + 1):
+        if cached_pre_layer_acts is None:
+            pre_layer_acts.append(rel + irrel)
+        layer_module = encoder_module.layer[i]
 
-        rel_vec = rel_out.detach().cpu().numpy()
-        irrel_vec = irrel_out.detach().cpu().numpy()
+        layer_head_mask = head_mask[i]
+        att_probs = None
+
+        if mean_acts is not None:
+            layer_mean_acts = mean_acts[i] #[512, 12, 64]
+        else:
+            layer_mean_acts = None
+        rel_n, irrel_n, layer_target_decomps, returned_att_probs = prop_BERT_layer_hh(rel, irrel, extended_attention_mask, 
+                                                                                    layer_head_mask, ablation_dict,
+                                                                                    target_nodes, i, 
+                                                                                    layer_mean_acts,
+                                                                                    layer_module, 
+                                                                                    device,
+                                                                                    att_probs, output_att_prob,
+                                                                                    set_irrel_to_mean=set_irrel_to_mean)
+        for idx in range(len(target_decomps)):
+            target_decomps[idx] += layer_target_decomps[idx]
         
-        out_decomps.append((rel_vec, irrel_vec))
-        target_decomps.append(batch_target_decomps)
+        normalize_rel_irrel(rel_n, irrel_n)
+        rel, irrel = rel_n, irrel_n
+
+        if output_att_prob:
+            att_probs_lst.append(returned_att_probs.squeeze(0))
+
+    rel_pool, irrel_pool = prop_pooler(rel, irrel, model.bert.pooler)
+    rel_out, irrel_out = prop_linear(rel_pool, irrel_pool, model.classifier)
+    
+    out_decomps = []
+    for ablation, batch_indices in ablation_dict.items():
+        rel_vec = rel_out[batch_indices, :].detach().cpu().numpy()
+        irrel_vec = irrel_out[batch_indices, :].detach().cpu().numpy()       
+        out_decomps.append(OutputDecomposition(ablation, rel_vec, irrel_vec))
     
     return out_decomps, target_decomps, att_probs_lst, pre_layer_acts
 
@@ -395,8 +386,7 @@ This is different from running a model on a batch of input data.
 Instead it calculates the decomposition relative to many source nodes at the same time.
 '''
 
-# Temporary, used to transition the return format of prop_model functions.
-def batch_run_new(prop_model_fn, ablation_list, num_at_time=64, n_layers=12):
+def batch_run(prop_model_fn, ablation_list, num_at_time=64, n_layers=12):
     
     out_decomps = []
     target_decomps = []
@@ -416,20 +406,3 @@ def batch_run_new(prop_model_fn, ablation_list, num_at_time=64, n_layers=12):
     
     return out_decomps, target_decomps
 
-def batch_run(prop_model_fn, ablation_list, num_at_time=64, n_layers=12):
-    
-    out_decomps = []
-    target_decomps = [[] for i in range(n_layers)]
-    
-    n_ablations = len(ablation_list)
-    n_batches = int((n_ablations + (num_at_time - 1)) / num_at_time)
-
-    for b_no in range(n_batches):
-        b_st = b_no * num_at_time
-        b_end = min(b_st + num_at_time, n_ablations)
-        batch_out_decomps, batch_target_decomps, _, _ = prop_model_fn(ablation_list[b_st: b_end])
-
-        out_decomps = out_decomps + batch_out_decomps
-        target_decomps = [target_decomps[i] + batch_target_decomps[i] for i in range(n_layers)]
-    
-    return out_decomps, target_decomps
