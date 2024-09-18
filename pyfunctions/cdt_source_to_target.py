@@ -2,7 +2,7 @@ from transformers.activations import NewGELUActivation
 import pdb
 import transformer_lens
 from typing import Optional
-
+import tqdm
 from pyfunctions.cdt_from_source_nodes import *
 from pyfunctions.wrappers import GPTAttentionWrapper, GPTLayerNormWrapper, OutputDecomposition, TargetNodeDecompositionList, AblationSet, Node
 
@@ -162,7 +162,7 @@ def prop_GPT_layer(rel, irrel, attention_mask, head_mask,
     # print('irrel norm after set_rel_at_source_nodes: ', np.linalg.norm(irrel_attn_residual.cpu().numpy()))
     # rel_attn_residual, irrel_attn_residual = set_rel_at_source_nodes(rel_attn_residual, irrel_attn_residual, ablation_dict, layer_mean_acts, level, attn_wrapper, set_irrel_to_mean, device)
 
-    layer_target_decomps = calculate_contributions_new(rel_attn_residual, irrel_attn_residual, ablation_dict,
+    layer_target_decomps = calculate_contributions(rel_attn_residual, irrel_attn_residual, ablation_dict,
                                                                            target_nodes, level,
                                                                            attn_wrapper, device=device)
     rel_mid, irrel_mid = rel + rel_attn_residual, irrel + irrel_attn_residual
@@ -394,10 +394,10 @@ def batch_run(prop_model_fn, ablation_list, num_at_time=64, n_layers=12):
     n_ablations = len(ablation_list)
     n_batches = int((n_ablations + (num_at_time - 1)) / num_at_time)
 
-    for b_no in range(n_batches):
+    for b_no in tqdm.tqdm(range(n_batches), desc="Running decomposition in batches..."):
         b_st = b_no * num_at_time
         b_end = min(b_st + num_at_time, n_ablations)
-        print('Running inputs %d to %d (of %d)' % (b_st, b_end, n_ablations))
+        #print('Running inputs %d to %d (of %d)' % (b_st, b_end, n_ablations))
         batch_out_decomps, batch_target_decomps, _, _ = prop_model_fn(ablation_list[b_st: b_end])
 
         out_decomps += batch_out_decomps
@@ -405,4 +405,3 @@ def batch_run(prop_model_fn, ablation_list, num_at_time=64, n_layers=12):
     
     
     return out_decomps, target_decomps
-

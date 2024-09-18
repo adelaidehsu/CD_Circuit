@@ -5,20 +5,26 @@ from captum.attr import (IntegratedGradients,
                          remove_interpretable_embedding_layer)
 import torch
 
-def configure_interpretable_embeddings(model):
+def configure_interpretable_embeddings(model, model_type):
     """Configure interpretable embedding layer"""
-    interpretable_embedding1 = configure_interpretable_embedding_layer(
-        model, "bert.embeddings.word_embeddings")
-    interpretable_embedding2 = configure_interpretable_embedding_layer(
-        model, "bert.embeddings.token_type_embeddings")
-    interpretable_embedding3 = configure_interpretable_embedding_layer(
-        model,"bert.embeddings.position_embeddings")
+    if model_type == "bert":
+        interpretable_embedding1 = configure_interpretable_embedding_layer(
+            model, "bert.embeddings.word_embeddings")
+        interpretable_embedding2 = configure_interpretable_embedding_layer(
+            model, "bert.embeddings.token_type_embeddings")
+        interpretable_embedding3 = configure_interpretable_embedding_layer(
+            model,"bert.embeddings.position_embeddings")
+    elif model_type == "gpt2":
+        interpretable_embedding1 = configure_interpretable_embedding_layer(
+            model, "hook_pos_embed")
+        interpretable_embedding2 = None
+        interpretable_embedding3 = None
     return (interpretable_embedding1,
             interpretable_embedding2,
             interpretable_embedding3)
 
 def get_input_data(interpretable_embedding1, interpretable_embedding2, interpretable_embedding3,
-                   text, tokenizer, max_seq_len, device):
+                   text, tokenizer, max_seq_len, device, model_type):
     def place_on_device(*tensors):
         tensors_device = []
         for t in tensors:
@@ -26,7 +32,7 @@ def get_input_data(interpretable_embedding1, interpretable_embedding2, interpret
         return tuple(tensors_device)
 
     input_data = place_on_device(*prepare_input(text, tokenizer, max_seq_len))
-    input_data += (interpretable_embedding1, interpretable_embedding2, interpretable_embedding3, )
+    input_data += (interpretable_embedding1, interpretable_embedding2, interpretable_embedding3, model_type)
     input_data_embed = prepare_input_embed(*input_data)
     return input_data, input_data_embed
 
@@ -57,39 +63,56 @@ def prepare_input(text, tokenizer, max_seq_len):
 
 def prepare_input_embed(input_ids, token_type_ids, position_ids,
                         ref_input_ids, ref_token_type_ids, ref_position_ids,
-                        attention_mask, interpretable_embedding1, interpretable_embedding2, interpretable_embedding3):
+                        attention_mask, interpretable_embedding1, interpretable_embedding2, interpretable_embedding3, model_type):
     """Construct input for the modified model"""
     input_ids_embed = interpretable_embedding1.indices_to_embeddings(input_ids)
     ref_input_ids_embed = interpretable_embedding1.indices_to_embeddings(
         ref_input_ids)
-    token_type_ids_embed = interpretable_embedding2.indices_to_embeddings(
-        token_type_ids)
-    ref_token_type_ids_embed = interpretable_embedding2.indices_to_embeddings(
-        ref_token_type_ids)
-    position_ids_embed = interpretable_embedding3.indices_to_embeddings(
-        position_ids)
-    ref_position_ids_embed = interpretable_embedding3.indices_to_embeddings(
-        ref_position_ids)
+    if model_type == "bert":
+        token_type_ids_embed = interpretable_embedding2.indices_to_embeddings(
+            token_type_ids)
+        ref_token_type_ids_embed = interpretable_embedding2.indices_to_embeddings(
+            ref_token_type_ids)
+        position_ids_embed = interpretable_embedding3.indices_to_embeddings(
+            position_ids)
+        ref_position_ids_embed = interpretable_embedding3.indices_to_embeddings(
+            ref_position_ids)
+    elif model_type == "gpt2":
+        token_type_ids_embed = None
+        ref_token_type_ids_embed = None
+        position_ids_embed = None
+        ref_position_ids_embed = None
 
     return (input_ids_embed, token_type_ids_embed, position_ids_embed,
             ref_input_ids_embed, ref_token_type_ids_embed,
             ref_position_ids_embed, attention_mask)
 
-def ig_attribute(ig, class_index, input_data_embed):
-    return ig.attribute(inputs=input_data_embed[0:3],
-                        baselines=input_data_embed[3:6],
-                        additional_forward_args=(input_data_embed[6]),
-                        target = class_index,
-                        return_convergence_delta=True,
-                        n_steps=25)
+def ig_attribute(ig, class_index, input_data_embed, model_type):
+    if model_type == "bert":
+        return ig.attribute(inputs=input_data_embed[0:3],
+                            baselines=input_data_embed[3:6],
+                            additional_forward_args=(input_data_embed[6]),
+                            target = class_index,
+                            return_convergence_delta=True,
+                            n_steps=25)
+    elif model_type == "gpt2":
+        return ig.attribute(inputs=input_data_embed[0],
+                            baselines=input_data_embed[3],
+                            target = class_index,
+                            return_convergence_delta=True,
+                            n_steps=25)
 
 def remove_interpretable_embeddings(model, interpretable_embedding1,
                                     interpretable_embedding2,
-                                    interpretable_embedding3):
+                                    interpretable_embedding3, model_type):
     """Remove interpretable layer to restore the original model structure"""
+    print(model.hook_pos_embed)
     if not \
     type(model.get_input_embeddings()).__name__ == "InterpretableEmbeddingBase":
         return
-    remove_interpretable_embedding_layer(model, interpretable_embedding1)
-    remove_interpretable_embedding_layer(model, interpretable_embedding2)
-    remove_interpretable_embedding_layer(model, interpretable_embedding3)
+    if model_type == "bert":
+        remove_interpretable_embedding_layer(model, interpretable_embedding1)
+        remove_interpretable_embedding_layer(model, interpretable_embedding2)
+        remove_interpretable_embedding_layer(model, interpretable_embedding3)
+    elif model_type == "gpt2":
+        remove_interpretable_embedding_layer(model, interpretable_embedding1)
