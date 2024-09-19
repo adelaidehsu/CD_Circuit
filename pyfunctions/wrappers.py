@@ -46,6 +46,7 @@ class GPTOutputMatrixWrapper():
         # output matrix is separate per attention head (num_heads, d_value_rank, d_model)
         # other code assumes a concatenated value matrix (d_model, num_heads * d_value_rank)
         old_shape = weight.size()
+        # analogous to the value matrix wrappeExpected size for first two dimensions of batch2 tensor to be: [768, 768] but got: [768, 12].
         new_shape = (old_shape[0] * old_shape[1],) + (old_shape[2],)
         self.weight = (weight.view(new_shape))
         self.weight = self.weight.transpose(0, 1)
@@ -54,7 +55,6 @@ class GPTOutputMatrixWrapper():
         self.bias = bias.view(new_bias_shape)
 
 
-# NOTE: Since we don't do decomposition of attention patterns, maybe this would have been better done by just replacing the entire attention pattern calculation with a method of this attention module. Oh well, we've already verified that this works correctly.
 class GPTAttentionWrapper():
     def __init__(self, attn_module):
         self.attn_module = attn_module

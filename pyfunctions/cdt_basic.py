@@ -4,6 +4,7 @@ import torch
 import math
 import pdb
 from torch import nn
+from fancy_einsum import einsum
 import transformer_lens
 from transformers.modeling_utils import ModuleUtilsMixin
 
@@ -61,18 +62,9 @@ def get_att_list(embedding_output, rel_pos,
     
     return att_scores
 
-# prop functions
-"""
-def prop_act(rel, irrel, act_module):
-    rel_a = act_module(rel)
-    irrel_a = act_module(irrel)
-    tot_a = act_module(rel + irrel)
-    rel_act = (rel_a + (tot_a - irrel_a)) / 2
-    irrel_act = (irrel_a + (tot_a - rel_a)) / 2
-    return rel_act, irrel_act
-"""
 
-# TODO: does this work correctly for all activations, or is this assuming GELU, or something else?
+# This is the decomposition for ReLU chosen by the Agglomerative Contextual Decomposition paper.
+# You could imagine a different decomposition for GeLU, or other activations.
 def prop_act(r, ir, act_mod):
     ir_act = act_mod(ir)
     r_act = act_mod(r + ir) - ir_act
@@ -249,6 +241,49 @@ def get_extended_attention_mask(attention_mask, input_shape, model, device):
     extended_attention_mask = extended_attention_mask.to(dtype=dtype)  # fp16 compatibility
     extended_attention_mask = (1.0 - extended_attention_mask) * torch.finfo(dtype).min
     return extended_attention_mask
+
+def prop_attention_probs(rel, irrel, attention_mask, head_mask, sa_module, tol=1e-8):
+    # TODO: make this work type-wise for the BERT model
+
+    # this is the linear_core logic, but i duplicated it here so that i could use einsum
+    rel_query_t = einsum("batch query_pos d_model, n_heads d_model d_head -> batch query_pos n_heads d_head", rel, sa_module.attn_module.W_Q)
+    irrel_query_t = einsum("batch query_pos d_model, n_heads d_model d_head -> batch query_pos n_heads d_head", irrel, sa_module.attn_module.W_Q)
+    exp_query_bias = sa_module.attn_module.b_Q.expand_as(rel_query_t)
+    q_tot = torch.abs(rel_query_t) + torch.abs(irrel_query_t) + tol
+    rel_query_bias = exp_query_bias * (torch.abs(rel_query_t) / q_tot)
+    irrel_query_bias = exp_query_bias * (torch.abs(irrel_query_t) / q_tot)
+
+    rel_queries = rel_query_t + rel_query_bias
+    irrel_queries = irrel_query_t + irrel_query_bias
+
+    rel_key_t = einsum("batch key_pos d_model, n_heads d_model d_head -> batch key_pos n_heads d_head", rel, sa_module.attn_module.W_K)
+    irrel_key_t = einsum("batch key_pos d_model, n_heads d_model d_head -> batch key_pos n_heads d_head", irrel, sa_module.attn_module.W_K)
+    exp_key_bias = sa_module.attn_module.b_K.expand_as(rel_key_t)
+    k_tot = torch.abs(rel_key_t) + torch.abs(irrel_key_t) + tol
+    rel_key_bias = exp_key_bias * (torch.abs(rel_key_t) / k_tot)
+    irrel_key_bias = exp_key_bias * (torch.abs(irrel_key_t) / k_tot)
+
+    rel_keys = rel_key_t + rel_key_bias
+    irrel_keys = irrel_key_t + irrel_key_bias
+    
+    # here rel_keys + irrel_keys should equal keys, ofc
+
+    total_attention_scores = einsum("batch query_pos n_heads d_head, batch key_pos n_heads d_head -> batch n_heads query_pos key_pos", \
+        (rel_queries + irrel_queries), (rel_keys + irrel_keys)) / math.sqrt(rel_keys.shape[-1])
+    total_attention_scores += attention_mask
+
+
+    rel_attention_scores = einsum("batch query_pos n_heads d_head, batch key_pos n_heads d_head -> batch n_heads query_pos key_pos", \
+        rel_queries, rel_keys) / math.sqrt(rel_keys.shape[-1])
+    rel_attention_scores += attention_mask
+
+
+    # it may be more principled to do a "linearization" of softmax like in the original CD paper to get this
+    total_attention_probs = nn.functional.softmax(total_attention_scores, dim=-1)
+    rel_attention_probs = nn.functional.softmax(rel_attention_scores, dim=-1)
+    irrel_attention_probs = total_attention_probs - rel_attention_probs
+    
+    return rel_attention_probs, irrel_attention_probs
 
 
 def get_attention_probs(tot_embed, attention_mask, head_mask, sa_module):

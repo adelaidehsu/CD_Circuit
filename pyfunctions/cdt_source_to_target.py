@@ -2,7 +2,8 @@ from transformers.activations import NewGELUActivation
 import pdb
 import transformer_lens
 from typing import Optional
-import tqdm
+
+from pyfunctions.cdt_basic import *
 from pyfunctions.cdt_from_source_nodes import *
 from pyfunctions.wrappers import GPTAttentionWrapper, GPTLayerNormWrapper, OutputDecomposition, TargetNodeDecompositionList, AblationSet, Node
 
@@ -31,37 +32,37 @@ def calculate_contributions(rel, irrel, ablation_dict, target_nodes, level, sa_m
 # and GPT doing one after, so it's messy to write a single "attention" function which handles both.
 # However, the contents of this function are common to both BERT and GPT.
 def prop_attention_no_output_hh(rel, irrel, attention_mask, 
-                           head_mask, sa_module, att_probs = None,
-                           output_att_prob=False):
+                           head_mask, sa_module, att_probs = None):
     if att_probs is not None:
         att_probs = att_probs
     else:
-        att_probs = get_attention_probs(rel[0].unsqueeze(0) + irrel[0].unsqueeze(0), attention_mask, head_mask, sa_module)
+        # att_probs = get_attention_probs(rel[0].unsqueeze(0) + irrel[0].unsqueeze(0), attention_mask, head_mask, sa_module)
+        rel_att_probs, irrel_att_probs = prop_attention_probs(rel, irrel, attention_mask, head_mask, sa_module)
+        att_probs = rel_att_probs + irrel_att_probs
 
     rel_value, irrel_value = prop_linear(rel, irrel, sa_module.value)
-
-    rel_context = mul_att(att_probs, rel_value, sa_module)
-
-    irrel_context = mul_att(att_probs, irrel_value, sa_module)
     
-    #print(sa_module(rel+irrel)[0].all() == (rel_context+irrel_context).all()) #passed
+    # TODO: if this doesn't work just implement stuff so that it's head-wise instead of having to deal with constant reshaping
+    total_context = mul_att(att_probs, (rel_value + irrel_value), sa_module)
+    rel_context = mul_att(rel_att_probs, rel_value, sa_module)
+    irrel_context = total_context - rel_context
+    # rel_context = mul_att(att_probs, rel_value, sa_module)
 
-    if output_att_prob:
-        return rel_context, irrel_context, att_probs
-    else:
-        return rel_context, irrel_context, None
+    # irrel_context = mul_att(att_probs, irrel_value, sa_module)
+    
+    return rel_context, irrel_context, att_probs
+
     
 def prop_BERT_attention_hh(rel, irrel, attention_mask, 
                       head_mask, ablation_list, target_nodes, level,
                       layer_mean_acts,
-                      a_module, device, att_probs = None, output_att_prob=False, set_irrel_to_mean=False):
+                      a_module, device, att_probs = None, set_irrel_to_mean=False):
     
     rel_context, irrel_context, returned_att_probs = prop_attention_no_output_hh(rel, irrel, 
                                                                         attention_mask, 
                                                                         head_mask, 
                                                                         a_module.self,
-                                                                        att_probs,
-                                                                        output_att_prob=output_att_prob)
+                                                                        att_probs)
     
     #print(a_module.self(rel+irrel)[0].all() == (rel_context+irrel_context).all()) #passed
     
@@ -99,16 +100,7 @@ def prop_BERT_attention_hh(rel, irrel, attention_mask,
     #print((rel_out+irrel_out).all() == tmp.all()) #passed
     
     return rel_out, irrel_out, target_decomps, returned_att_probs
-'''
-prop_BERT_layer_hh(rel, irrel, extended_attention_mask, 
-                                                                                    layer_head_mask,
-                                                                                    target_nodes, i, 
-                                                                                    layer_mean_acts,
-                                                                                    layer_module, 
-                                                                                    device,
-                                                                                    att_probs, output_att_prob,
-                                                                                    set_irrel_to_mean=set_irrel_to_mean)
-                                                                                    '''
+
 def prop_BERT_layer_hh(rel, irrel, attention_mask, head_mask, 
                   ablation_list, target_nodes, level, layer_mean_acts,
                   layer_module, device, att_probs = None, output_att_prob=False, set_irrel_to_mean=False):
@@ -118,7 +110,7 @@ def prop_BERT_layer_hh(rel, irrel, attention_mask, head_mask,
                                                                            target_nodes, level, layer_mean_acts,
                                                                            layer_module.attention,
                                                                            device,
-                                                                           att_probs, output_att_prob, set_irrel_to_mean=set_irrel_to_mean)
+                                                                           att_probs, set_irrel_to_mean=set_irrel_to_mean)
 
     #print(layer_module.attention(rel+irrel)[0].all() == (rel_a+irrel_a).all()) #passed
     
@@ -146,7 +138,7 @@ def prop_BERT_layer_hh(rel, irrel, attention_mask, head_mask,
 
 def prop_GPT_layer(rel, irrel, attention_mask, head_mask, 
                   ablation_dict, target_nodes, level, layer_mean_acts,
-                  layer_module, device, att_probs = None, output_att_prob=False, set_irrel_to_mean=False):
+                  layer_module, device, att_probs = None, set_irrel_to_mean=False):
     # TODO: there should be some kind of casework for the folded layernorm,
     # if we want to perfectly apples-to-apples reproduce the IOI paper. 
     rel_ln, irrel_ln = prop_layer_norm(rel, irrel, GPTLayerNormWrapper(layer_module.ln1))
@@ -154,19 +146,22 @@ def prop_GPT_layer(rel, irrel, attention_mask, head_mask,
     rel_summed_values, irrel_summed_values, returned_att_probs = prop_attention_no_output_hh(rel_ln, irrel_ln, attention_mask, 
                                                                            head_mask,
                                                                            attn_wrapper,
-
-                                                                           att_probs, output_att_prob)
-
+                                                                           att_probs)
+    rel_summed_values, irrel_summed_values = set_rel_at_source_nodes(rel_summed_values, irrel_summed_values, ablation_dict, layer_mean_acts, level, attn_wrapper, set_irrel_to_mean, device)
+    layer_target_decomps = calculate_contributions(rel_summed_values, irrel_summed_values, ablation_dict,
+                                                                           target_nodes, level,
+                                                                           attn_wrapper, device=device)
+    
     rel_attn_residual, irrel_attn_residual = prop_linear(rel_summed_values, irrel_summed_values, attn_wrapper.output)
     # now that we've calculated the output of the attention mechanism, set desired inputs to "relevant"
     # print('irrel norm after set_rel_at_source_nodes: ', np.linalg.norm(irrel_attn_residual.cpu().numpy()))
-    # rel_attn_residual, irrel_attn_residual = set_rel_at_source_nodes(rel_attn_residual, irrel_attn_residual, ablation_dict, layer_mean_acts, level, attn_wrapper, set_irrel_to_mean, device)
+    #rel_attn_residual, irrel_attn_residual = set_rel_at_source_nodes(rel_attn_residual, irrel_attn_residual, ablation_dict, layer_mean_acts, level, attn_wrapper, set_irrel_to_mean, device)
 
-    layer_target_decomps = calculate_contributions(rel_attn_residual, irrel_attn_residual, ablation_dict,
-                                                                           target_nodes, level,
-                                                                           attn_wrapper, device=device)
+    # layer_target_decomps = calculate_contributions(rel_attn_residual, irrel_attn_residual, ablation_dict,
+    #                                                                        target_nodes, level,
+    #                                                                       attn_wrapper, device=device)
     rel_mid, irrel_mid = rel + rel_attn_residual, irrel + irrel_attn_residual
-    rel_mid, irrel_mid = set_rel_at_source_nodes(rel_mid, irrel_mid, ablation_dict, layer_mean_acts, level, attn_wrapper, set_irrel_to_mean, device)
+    # rel_mid, irrel_mid = set_rel_at_source_nodes(rel_mid, irrel_mid, ablation_dict, layer_mean_acts, level, attn_wrapper, set_irrel_to_mean, device)
 
     rel_mid_norm, irrel_mid_norm = prop_layer_norm(rel_mid, irrel_mid, GPTLayerNormWrapper(layer_module.ln2))
     
@@ -200,7 +195,6 @@ def prop_BERT_hh(encoding,
                 target_nodes: list[Node],
                 device,
                 mean_acts: Optional[torch.Tensor] = None,
-                output_att_prob=False,
                 set_irrel_to_mean=False,
                 cached_pre_layer_acts: Optional[torch.Tensor] = None):
     input_shape = encoding.input_ids.size()
@@ -267,7 +261,7 @@ def prop_BERT_hh(encoding,
                                                                                     layer_mean_acts,
                                                                                     layer_module, 
                                                                                     device,
-                                                                                    att_probs, output_att_prob,
+                                                                                    att_probs,
                                                                                     set_irrel_to_mean=set_irrel_to_mean)
         for idx in range(len(target_decomps)):
             target_decomps[idx] += layer_target_decomps[idx]
@@ -303,7 +297,6 @@ def prop_GPT(encoding_idxs: torch.Tensor,
             device,
             mean_acts: Optional[torch.Tensor] = None,
             att_list: Optional[torch.Tensor] = None,
-            output_att_prob=False,
             set_irrel_to_mean=False,
             cached_pre_layer_acts: Optional[torch.Tensor] = None):
     head_mask = [None] * len(model.blocks)
@@ -363,13 +356,13 @@ def prop_GPT(encoding_idxs: torch.Tensor,
                                                                                  layer_mean_acts,
                                                                                  layer_module, 
                                                                                  device,
-                                                                                 att_probs, output_att_prob,
+                                                                                 att_probs,
                                                                                  set_irrel_to_mean=set_irrel_to_mean)
         for idx in range(len(target_decomps)):
             target_decomps[idx] += layer_target_decomps[idx]
 
-        if output_att_prob:
-            att_probs_lst.append(returned_att_probs.squeeze(0))
+
+        att_probs_lst.append(returned_att_probs.squeeze(0))
 
     rel, irrel = prop_layer_norm(rel, irrel, GPTLayerNormWrapper(model.ln_final))
     rel_out, irrel_out = prop_GPT_unembed(rel, irrel, model.unembed)
