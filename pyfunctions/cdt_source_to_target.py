@@ -2,6 +2,7 @@ from transformers.activations import NewGELUActivation
 import pdb
 import transformer_lens
 from typing import Optional
+from fancy_einsum import einsum
 
 from pyfunctions.cdt_basic import *
 from pyfunctions.cdt_from_source_nodes import *
@@ -22,6 +23,65 @@ def calculate_contributions(rel, irrel, ablation_dict, target_nodes, level, sa_m
         target_decomps.append(target_decomps_for_ablation)
     return target_decomps
 
+def calculate_contributions_at_query(rel, irrel, ablation_dict, target_nodes, level, sa_module, device):
+
+    # rel = reshape_separate_attention_heads(rel, sa_module)
+    # irrel = reshape_separate_attention_heads(irrel, sa_module)
+    target_nodes_at_level = [node for node in target_nodes if node[0] == level]
+    target_decomps = []
+    
+    for ablation, batch_indices in ablation_dict.items():
+        target_decomps_for_ablation = TargetNodeDecompositionList(ablation)            
+
+        for t in target_nodes_at_level:
+            target_decomps_for_ablation.append(t, rel[batch_indices, t.sequence_idx, t.attn_head_idx, :],
+                                                irrel[batch_indices, t.sequence_idx, t.attn_head_idx, :])
+        target_decomps.append(target_decomps_for_ablation)
+    return target_decomps
+
+def prop_attention_probs_tmp(rel, irrel, attention_mask, head_mask, sa_module, ablation_dict, target_nodes, level, device, tol=1e-8):
+    # TODO: make this work type-wise for the BERT model
+
+    # this is the linear_core logic, but i duplicated it here so that i could use einsum
+    rel_query_t = einsum("batch query_pos d_model, n_heads d_model d_head -> batch query_pos n_heads d_head", rel, sa_module.attn_module.W_Q)
+    irrel_query_t = einsum("batch query_pos d_model, n_heads d_model d_head -> batch query_pos n_heads d_head", irrel, sa_module.attn_module.W_Q)
+    exp_query_bias = sa_module.attn_module.b_Q.expand_as(rel_query_t)
+    q_tot = torch.abs(rel_query_t) + torch.abs(irrel_query_t) + tol
+    rel_query_bias = exp_query_bias * (torch.abs(rel_query_t) / q_tot)
+    irrel_query_bias = exp_query_bias * (torch.abs(irrel_query_t) / q_tot)
+
+    rel_queries = rel_query_t + rel_query_bias
+    irrel_queries = irrel_query_t + irrel_query_bias
+    target_decomps = calculate_contributions_at_query(rel_queries, irrel_queries, ablation_dict, target_nodes, level, sa_module, device)
+
+    rel_key_t = einsum("batch key_pos d_model, n_heads d_model d_head -> batch key_pos n_heads d_head", rel, sa_module.attn_module.W_K)
+    irrel_key_t = einsum("batch key_pos d_model, n_heads d_model d_head -> batch key_pos n_heads d_head", irrel, sa_module.attn_module.W_K)
+    exp_key_bias = sa_module.attn_module.b_K.expand_as(rel_key_t)
+    k_tot = torch.abs(rel_key_t) + torch.abs(irrel_key_t) + tol
+    rel_key_bias = exp_key_bias * (torch.abs(rel_key_t) / k_tot)
+    irrel_key_bias = exp_key_bias * (torch.abs(irrel_key_t) / k_tot)
+
+    rel_keys = rel_key_t + rel_key_bias
+    irrel_keys = irrel_key_t + irrel_key_bias
+    
+    # here rel_keys + irrel_keys should equal keys, ofc
+
+    total_attention_scores = einsum("batch query_pos n_heads d_head, batch key_pos n_heads d_head -> batch n_heads query_pos key_pos", \
+        (rel_queries + irrel_queries), (rel_keys + irrel_keys)) / math.sqrt(rel_keys.shape[-1])
+    total_attention_scores += attention_mask
+
+
+    rel_attention_scores = einsum("batch query_pos n_heads d_head, batch key_pos n_heads d_head -> batch n_heads query_pos key_pos", \
+        rel_queries, rel_keys) / math.sqrt(rel_keys.shape[-1])
+    rel_attention_scores += attention_mask
+
+
+    # it may be more principled to do a "linearization" of softmax like in the original CD paper to get this
+    total_attention_probs = nn.functional.softmax(total_attention_scores, dim=-1)
+    rel_attention_probs = nn.functional.softmax(rel_attention_scores, dim=-1)
+    irrel_attention_probs = total_attention_probs - rel_attention_probs
+    
+    return rel_attention_probs, irrel_attention_probs, target_decomps
 
 # This function handles what is usually called the attention mechanism, up to the point
 # where the softmax'd attention pattern is multiplied by the value vectors.
@@ -32,25 +92,25 @@ def calculate_contributions(rel, irrel, ablation_dict, target_nodes, level, sa_m
 # and GPT doing one after, so it's messy to write a single "attention" function which handles both.
 # However, the contents of this function are common to both BERT and GPT.
 def prop_attention_no_output_hh(rel, irrel, attention_mask, 
-                           head_mask, sa_module, att_probs = None):
+                           head_mask, sa_module, ablation_dict, target_nodes, level, device, att_probs = None):
     if att_probs is not None:
         att_probs = att_probs
     else:
         # att_probs = get_attention_probs(rel[0].unsqueeze(0) + irrel[0].unsqueeze(0), attention_mask, head_mask, sa_module)
-        rel_att_probs, irrel_att_probs = prop_attention_probs(rel, irrel, attention_mask, head_mask, sa_module)
+        rel_att_probs, irrel_att_probs, target_decomps = prop_attention_probs_tmp(rel, irrel, attention_mask, head_mask, sa_module, ablation_dict, target_nodes, level, device)
         att_probs = rel_att_probs + irrel_att_probs
 
     rel_value, irrel_value = prop_linear(rel, irrel, sa_module.value)
     
     # TODO: if this doesn't work just implement stuff so that it's head-wise instead of having to deal with constant reshaping
-    total_context = mul_att(att_probs, (rel_value + irrel_value), sa_module)
-    rel_context = mul_att(rel_att_probs, rel_value, sa_module)
-    irrel_context = total_context - rel_context
-    # rel_context = mul_att(att_probs, rel_value, sa_module)
+    # total_context = mul_att(att_probs, (rel_value + irrel_value), sa_module)
+    # rel_context = mul_att(rel_att_probs, rel_value, sa_module)
+    # irrel_context = total_context - rel_context
 
-    # irrel_context = mul_att(att_probs, irrel_value, sa_module)
+    rel_context = mul_att(att_probs, rel_value, sa_module)
+    irrel_context = mul_att(att_probs, irrel_value, sa_module)
     
-    return rel_context, irrel_context, att_probs
+    return rel_context, irrel_context, att_probs, target_decomps
 
     
 def prop_BERT_attention_hh(rel, irrel, attention_mask, 
@@ -58,7 +118,7 @@ def prop_BERT_attention_hh(rel, irrel, attention_mask,
                       layer_mean_acts,
                       a_module, device, att_probs = None, set_irrel_to_mean=False):
     
-    rel_context, irrel_context, returned_att_probs = prop_attention_no_output_hh(rel, irrel, 
+    rel_context, irrel_context, returned_att_probs, = prop_attention_no_output_hh(rel, irrel, 
                                                                         attention_mask, 
                                                                         head_mask, 
                                                                         a_module.self,
@@ -143,15 +203,17 @@ def prop_GPT_layer(rel, irrel, attention_mask, head_mask,
     # if we want to perfectly apples-to-apples reproduce the IOI paper. 
     rel_ln, irrel_ln = prop_layer_norm(rel, irrel, GPTLayerNormWrapper(layer_module.ln1))
     attn_wrapper = GPTAttentionWrapper(layer_module.attn)
-    rel_summed_values, irrel_summed_values, returned_att_probs = prop_attention_no_output_hh(rel_ln, irrel_ln, attention_mask, 
+    
+    rel_summed_values, irrel_summed_values, returned_att_probs, layer_target_decomps = prop_attention_no_output_hh(rel_ln, irrel_ln, attention_mask, 
                                                                            head_mask,
                                                                            attn_wrapper,
-                                                                           att_probs)
+                                                                           ablation_dict, target_nodes, level, device)
     rel_summed_values, irrel_summed_values = set_rel_at_source_nodes(rel_summed_values, irrel_summed_values, ablation_dict, layer_mean_acts, level, attn_wrapper, set_irrel_to_mean, device)
+    '''
     layer_target_decomps = calculate_contributions(rel_summed_values, irrel_summed_values, ablation_dict,
                                                                            target_nodes, level,
                                                                            attn_wrapper, device=device)
-    
+    '''
     rel_attn_residual, irrel_attn_residual = prop_linear(rel_summed_values, irrel_summed_values, attn_wrapper.output)
     # now that we've calculated the output of the attention mechanism, set desired inputs to "relevant"
     # print('irrel norm after set_rel_at_source_nodes: ', np.linalg.norm(irrel_attn_residual.cpu().numpy()))
