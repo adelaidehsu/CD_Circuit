@@ -48,6 +48,13 @@ def set_rel_at_source_nodes(rel, irrel, ablation_dict, layer_mean_acts, layer_id
                 continue
             sq = source_node.sequence_idx
             head = source_node.attn_head_idx
+            '''
+            if source_node == Node(9, 14, 9):
+                print('activation: ')
+                print(rel[batch_indices, sq, head, :] + irrel[batch_indices, sq, head, :])
+                print('mean: ')
+                print(layer_mean_acts[:, sq, head, :])
+            '''
             if set_irrel_to_mean:
                 rel[batch_indices, sq, head, :] = irrel[batch_indices, sq, head, :] + rel[batch_indices, sq, head, :] - torch.Tensor(layer_mean_acts[:, sq, head, :]).to(device)
                 irrel[batch_indices, sq, head, :] = torch.Tensor(layer_mean_acts[:, sq, head, :]).to(device)
