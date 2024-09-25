@@ -58,7 +58,7 @@ def load_data_and_model(data_name, model_type, device):
         data, le_dict = load_sst2_data()
         # load model
         model = AutoModelForSequenceClassification.from_pretrained("textattack/bert-base-uncased-SST-2")
-    elif identifier == "agnews_bert":
+    elif (identifier == "agnews_bert") or (identifier == "agnews_rand_bert"):
         tokenizer = AutoTokenizer.from_pretrained("textattack/bert-base-uncased-ag-news")
         data, le_dict = load_agnews_data()
         # load model
@@ -78,20 +78,6 @@ def load_data_and_model(data_name, model_type, device):
     return data, le_dict, tokenizer, model
 
 def run_local_importance(text, tokenized_prompt, io_seq_idx, s_seq_idx, label_idx, max_seq_len, model, tokenizer, device, method, model_type, class_names):
-    #encoding = get_encoding(text, tokenizer, device, padding=False, truncation=True,  max_seq_len=max_seq_len)
-    '''encoding = tokenizer(text, add_special_tokens=True, padding = False, return_tensors="pt")
-    
-    if model_type == "bert":
-        pad_token_id = tokenizer.pad_token_id
-        if not pad_token_id:
-            pad_token_id = tokenizer.sep_token_id
-        toks = tokenizer.convert_ids_to_tokens([x for x in encoding['input_ids'][0] if x not in [pad_token_id,sep_token_id, cls_token_id] ])
-        intervals, words = compute_word_intervals(toks)
-        full_words = words
-    elif model_type == "gpt2":
-        words = tokenized_prompt.split('|')[:-1]
-        full_words = tokenized_prompt.split('|')
-        intervals = None'''
         
     if model_type == "bert":
         pad_token_id = tokenizer.pad_token_id
@@ -185,7 +171,7 @@ def run_cdt(text, model, tokenized_prompt, tokenizer, io_seq_idx, s_seq_idx, lab
             rel_word_scores.append(out_decomps[i].rel[0][label_idx])
             irrel_word_scores.append(out_decomps[i].irrel[0][label_idx])
             
-        toks = tokenizer.convert_ids_to_tokens(encoding.input_ids[0], skip_special_tokens=True)
+        toks = tokenizer.convert_ids_to_tokens(encoding.input_ids[0])
         intervals, words = compute_word_intervals(toks)
     
     return rel_word_scores, irrel_word_scores, intervals, words
@@ -384,9 +370,9 @@ def run_lig(text, model, tokenized_prompt, tokenizer, device, label_idx, model_t
                                           target=int(label_idx),
                                           return_convergence_delta=True,
                                           n_steps=25)
-        tok_scores = attributions[0].detach().cpu().numpy().squeeze().sum(1)[1:-1]
+        tok_scores = attributions[0].detach().cpu().numpy().squeeze().sum(1)
         #input_tokens = words
-        toks = tokenizer.convert_ids_to_tokens(input_ids[0], skip_special_tokens=True)
+        toks = tokenizer.convert_ids_to_tokens(input_ids[0])
         intervals, words = compute_word_intervals(toks)
         word_scores = combine_token_scores(intervals, tok_scores)
         
@@ -412,7 +398,10 @@ def visualize_common(word_scores, words, method):
     assert(len(word_scores) == len(words))
     normalized = normalize_word_scores(word_scores)
     print(f'Viz {method}: ')
-    display_colored_html(words, normalized)
+    if method != "LIG":
+        display_colored_html(words, normalized)
+    else:
+        display_colored_html(words[1:-1], normalized[1:-1])
 
 # visualization helper
 def visualize_cdt(scores, irrel_scores, intervals, words):
@@ -424,11 +413,11 @@ def visualize_cdt(scores, irrel_scores, intervals, words):
     irrel_normalized = normalize_word_scores(irrel_scores)
     
     print("Viz rel: ")
-    display_colored_html(words, normalized)
+    display_colored_html(words[1:-1], normalized[1:-1])
     print("Viz irrel: ")
-    display_colored_html(words, irrel_normalized)
+    display_colored_html(words[1:-1], irrel_normalized[1:-1])
     print("Viz rel-irrel: ")
-    display_colored_html(words, normalized - irrel_normalized)
+    display_colored_html(words[1:-1], (normalized - irrel_normalized)[1:-1])
     
 def display_colored_html(words, scores):
     s = colorize(words, scores)
