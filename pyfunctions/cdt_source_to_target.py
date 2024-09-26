@@ -478,7 +478,7 @@ This is different from running a model on a batch of input data.
 Instead it calculates the decomposition relative to many source nodes at the same time.
 '''
 
-def batch_run(prop_model_fn, ablation_list, num_at_time=64, n_layers=12):
+def batch_run(prop_model_fn, ablation_list, num_at_time=64, n_layers=12, print_progress=False):
     
     out_decomps = []
     target_decomps = []
