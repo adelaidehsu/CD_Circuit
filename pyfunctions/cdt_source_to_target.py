@@ -349,7 +349,10 @@ def prop_BERT_hh(encoding,
         att_probs = None
 
         if mean_acts is not None:
-            layer_mean_acts = mean_acts[i] #[512, 12, 64]
+            if layer_mean_acts.dim() == 3:
+                layer_mean_acts = mean_acts[i]
+            else:
+                layer_mean_acts = mean_acts[:, i, :, :]
         else:
             layer_mean_acts = None
         rel_n, irrel_n, layer_target_decomps, returned_att_probs = prop_BERT_layer_hh(rel, irrel, extended_attention_mask, 

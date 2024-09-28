@@ -76,7 +76,8 @@ The downside of this is that it can only be run on prompts adhering to one templ
 since the indices are explicit.
 '''
 def get_heads_and_posns_to_keep_explicit(
-    means_dataset: IOIDataset,
+    batch: int,
+    seq: int,
     model: HookedTransformer,
     circuit: List[Node],
 ) -> Dict[int, Bool[Tensor, "batch seq head"]]:
@@ -87,7 +88,7 @@ def get_heads_and_posns_to_keep_explicit(
     The output of this function will be used for the hook function that does ablation.
     '''
     heads_and_posns_to_keep = {}
-    batch, seq, n_heads = len(means_dataset), means_dataset.max_len, model.cfg.n_heads
+    n_heads = model.cfg.n_heads
 
     for layer in range(model.cfg.n_layers):
 
@@ -139,6 +140,7 @@ def compute_means_by_template(
     _, means_cache = model.run_with_cache(
         means_dataset.toks.long(),
         return_type=None,
+    
         names_filter=lambda name: name.endswith("z"),
     )
     # Create tensor to store means
@@ -159,7 +161,8 @@ def compute_means_by_template(
 
 def add_mean_ablation_hook(
     model: HookedTransformer,
-    means_dataset: IOIDataset,
+    means_dataset: Optional[IOIDataset] = None,
+    patch_values: Optional[Float[Tensor, "layer batch seq head_idx d_head"]] = None,
     circuit = CIRCUIT, # Union(Dict[str, List[Tuple[int, int]]], List[Node]) = CIRCUIT,
     seq_pos_to_keep: Dict[str, str] = SEQ_POS_TO_KEEP,
     is_permanent: bool = True,
@@ -177,13 +180,18 @@ def add_mean_ablation_hook(
     model.reset_hooks(including_permanent=True)
 
     # Compute the mean of each head's output on the ABC dataset, grouped by template
-    means = compute_means_by_template(means_dataset, model)
+    if means_dataset is not None:
+        means = compute_means_by_template(means_dataset, model)
+    else:
+        means = patch_values # just patch in these values, shape is "layer batch seq head_idx d_head"
+        batch_size = patch_values.size()[1]
+        seq_len = patch_values.size()[2]
 
     # Convert this into a boolean map
     if isinstance(circuit, dict):
-        heads_and_posns_to_keep = get_heads_and_posns_to_keep(means_dataset, model, circuit, seq_pos_to_keep)
+        heads_and_posns_to_keep = get_heads_and_posns_to_keep(means, model, circuit, seq_pos_to_keep)
     else:
-        heads_and_posns_to_keep = get_heads_and_posns_to_keep_explicit(means_dataset, model, circuit)
+        heads_and_posns_to_keep = get_heads_and_posns_to_keep_explicit(batch_size, seq_len, model, circuit)
 
     # Get a hook function which will patch in the mean z values for each head, at
     # all positions which aren't important for the circuit

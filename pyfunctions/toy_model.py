@@ -41,6 +41,7 @@ def prop_toy_model_4l(encoding_idxs: torch.Tensor,
             mean_acts: Optional[torch.Tensor] = None,
             att_list: Optional[torch.Tensor] = None,
             set_irrel_to_mean=False,
+            cached_pre_layer_acts: Optional[list[torch.Tensor]] = None,
             target_decomp_method = "residual",
 ):
     head_mask = [None] * len(model.blocks)
@@ -54,21 +55,45 @@ def prop_toy_model_4l(encoding_idxs: torch.Tensor,
     for ablation in ablation_list:
         ablation_dict[ablation] = list(range(start_batch_idx, start_batch_idx + actual_batch_size))
         start_batch_idx += actual_batch_size
-    embedding_output = model.embed(encoding_idxs) + model.pos_embed(encoding_idxs) 
 
-    irrel = embedding_output.repeat(len(ablation_list), 1, 1)
-    rel = torch.zeros(irrel.size(), dtype = embedding_output.dtype, device = device)
-
+    if cached_pre_layer_acts is None:
+        pre_layer_acts = []
+        earliest_layer_to_run = 0
+        latest_layer_to_run = len(model.blocks) - 1
+        embedding_output = model.embed(encoding_idxs) + model.pos_embed(encoding_idxs) 
+        irrel = embedding_output.repeat(len(ablation_list), 1, 1)
+        rel = torch.zeros(irrel.size(), dtype = embedding_output.dtype, device = device)
+    else:
+        pre_layer_acts = None
+        earliest_layer_to_run = len(model.blocks)
+        for ablation in ablation_list:
+            for source_node in ablation:
+                if source_node.layer_idx < earliest_layer_to_run:
+                    earliest_layer_to_run = source_node.layer_idx
+        if len(target_nodes) == 0:
+            # this allows us to calculate contribution of source node to logits with cached values
+            latest_layer_to_run = len(model.blocks) - 1
+        else:
+            latest_layer_to_run = 0
+            for target_node in target_nodes:
+                if target_node.layer_idx > latest_layer_to_run:
+                    latest_layer_to_run = target_node.layer_idx
+        irrel = cached_pre_layer_acts[earliest_layer_to_run].repeat(len(ablation_list), 1, 1)
+        rel = torch.zeros(irrel.size(), dtype = irrel.dtype, device = device)
     target_decomps = [TargetNodeDecompositionList(x) for x in ablation_list]
     
-    for i in range(len(model.blocks)):
-
+    for i in range(earliest_layer_to_run, latest_layer_to_run + 1):
+        if cached_pre_layer_acts is None:
+            pre_layer_acts.append(rel + irrel)
         layer_module = model.blocks[i]
         layer_head_mask = head_mask[i]
         att_probs = None
         
         if mean_acts is not None:
-            layer_mean_acts = mean_acts[i]
+            if mean_acts.dim() == 3:
+                layer_mean_acts = mean_acts[i]
+            else:
+                layer_mean_acts = mean_acts[:, i, :, :]
         else:
             layer_mean_acts = None
             
@@ -94,5 +119,4 @@ def prop_toy_model_4l(encoding_idxs: torch.Tensor,
         irrel_vec = irrel_out[batch_indices, :].detach().cpu().numpy()       
         out_decomps.append(OutputDecomposition(ablation, rel_vec, irrel_vec))
     att_probs_lst = [] # just to adhere to the API of analogous functions
-    pre_layer_acts = [] # just to adhere to the API of analogous functions
     return out_decomps, target_decomps, att_probs_lst, pre_layer_acts

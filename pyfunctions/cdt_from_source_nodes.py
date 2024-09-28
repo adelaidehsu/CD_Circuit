@@ -40,7 +40,8 @@ def set_rel_at_source_nodes(rel, irrel, ablation_dict, layer_mean_acts, layer_id
     irrel = reshape_separate_attention_heads(irrel, sa_module)
     if layer_mean_acts is not None:
         layer_mean_acts = reshape_separate_attention_heads(layer_mean_acts, sa_module)
-        layer_mean_acts = layer_mean_acts[None, :, :, :] # add on a batch dimension
+        if layer_mean_acts.dim() == 3: # may pass in a 4d tensor to patch with something other than mean
+            layer_mean_acts = layer_mean_acts[None, :, :, :] # add on a batch dimension
     
     for ablation, batch_indices in ablation_dict.items():
         for source_node in ablation:
