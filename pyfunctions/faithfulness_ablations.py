@@ -184,8 +184,14 @@ def add_mean_ablation_hook(
         means = compute_means_by_template(means_dataset, model)
     else:
         means = patch_values # just patch in these values, shape is "layer batch seq head_idx d_head"
-        batch_size = patch_values.size()[1]
-        seq_len = patch_values.size()[2]
+        # or else "layer seq head_idx d_head"
+        if patch_values.dim() == 5:
+            batch_size = patch_values.size()[1]
+            seq_len = patch_values.size()[2]
+        else:
+            batch_size = 1
+            seq_len = patch_values.size()[1]
+
 
     # Convert this into a boolean map
     if isinstance(circuit, dict):

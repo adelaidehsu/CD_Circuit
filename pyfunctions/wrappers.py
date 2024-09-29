@@ -117,12 +117,14 @@ type AblationSet = tuple[Node]
 
 
 class OutputDecomposition(NamedTuple):
+    # batch_indices: List
     ablation_set: AblationSet
     rel: torch.Tensor
     irrel: torch.Tensor
 
 @dataclass
 class TargetNodeDecompositionList:
+    # batch_indices: List
     ablation_set: AblationSet
     target_nodes: list[Node]
     rels: list[torch.Tensor]
@@ -141,6 +143,7 @@ class TargetNodeDecompositionList:
 
     # hopefully this doesn't slow things down too much with a bunch of reallocations
     def __add__(self, other):
+        # assert self.batch_indices == other.batch_indices
         assert self.ablation_set == other.ablation_set
         s = TargetNodeDecompositionList(self.ablation_set)
         s.target_nodes = self.target_nodes + other.target_nodes
