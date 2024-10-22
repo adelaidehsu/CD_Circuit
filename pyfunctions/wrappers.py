@@ -6,6 +6,7 @@ from dataclasses import dataclass
 '''
 These wrapper classes are used to make the GPT modules work with code intended for a HuggingFace
 BERT model.
+This file also contains some helper types for readability.
 '''
 
 class GPTLayerNormWrapper():
@@ -87,17 +88,6 @@ class GPTAttentionWrapper():
         return self.num_attention_heads * self.attention_head_size
     
 
-'''
-Helper classes for readability.
-'''
-
-'''
-class OutputDecomposition:
-    def __init__(self, source_node, rel, irrel):
-        self.source_node = source_node
-        self.rel = rel
-        self.irrel = irrel
-'''
 class Node(NamedTuple):
     layer_idx: int
     sequence_idx: int
@@ -107,14 +97,7 @@ class Node(NamedTuple):
 # you want to decompose into (rel, irrel) in the forward pass
 # however, it performs a function analogous to ablation in other interpretability techniques,
 # in that we can determine the importance of these nodes
-
-'''
-class AblationSet:
-    def __init__(self, nodes: list[Node]):
-        self.nodes = nodes
-'''
 type AblationSet = tuple[Node]
-
 
 class OutputDecomposition(NamedTuple):
     # batch_indices: List

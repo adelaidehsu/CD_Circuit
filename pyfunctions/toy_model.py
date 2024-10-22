@@ -1,3 +1,11 @@
+'''
+In order to reproduce the results of the docstring experiment, we use this 4-layer attention-only transformer.
+This transformer is a standard one that was released by Neel Nanda alongside the TransformerLens library, specifically
+for use in mechanistic interpretability experiments.
+This file serves as a good example of implementation of CDT for a custom model architecture.
+See also the file cdt_basic.py for another helpful example.
+'''
+
 import torch
 import transformer_lens
 from pyfunctions.cdt_source_to_target import prop_attention_no_output_hh, calculate_contributions

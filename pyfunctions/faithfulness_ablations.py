@@ -1,5 +1,7 @@
 '''
-Taken from the ARENA 3.0 notebook on the IOI task.
+Taken from the ARENA 3.0 notebook on the IOI task, written by Callum McDougall.
+We are not aware of any formal attribution requirements for this code, including any licenses.
+Please contact us if you understand otherwise.
 '''
 
 import torch

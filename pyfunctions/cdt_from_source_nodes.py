@@ -1,15 +1,9 @@
 from pyfunctions.cdt_basic import *
+from pyfunctions.cdt_core import *
+from pyfunctions.cdt_ablations import *
 from pyfunctions.wrappers import AblationSet, Node
 
-def reshape_separate_attention_heads(context_layer, sa_module):
-    new_shape = context_layer.size()[:-1] + (sa_module.num_attention_heads, sa_module.attention_head_size)
-    context_layer = context_layer.view(new_shape)
-    return context_layer
 
-def reshape_concatenate_attention_heads(context_layer, sa_module):
-    new_shape = context_layer.size()[:-2] + (sa_module.all_head_size,)
-    context_layer = context_layer.view(*new_shape)
-    return context_layer
 
 def prop_self_attention_patched(rel, irrel, attention_mask, 
                                 head_mask,
