@@ -7,7 +7,7 @@ It does not contain any patching/ablation code, which we use for the circuit dis
 
 This file also contains some utility functions for evaluating BERT models, since they are similar to the functions necessary to implement CD on BERT.
 '''
-from cdt_core import *
+from pyfunctions.cdt_core import *
 
 def prop_self_attention(rel, irrel, attention_mask, head_mask, sa_module, att_probs = None):
     if att_probs is not None:

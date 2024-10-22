@@ -3,7 +3,7 @@ This file contains some functions necessary for our more general method.
 Where named similarly, they are analogous to the functions found in cdt_core.py, 
 but they also contain the logic to patch rel/irrel values in order to calculate decompositions of nodes at an intermediate layer.
 '''
-from cdt_core import *
+from pyfunctions.cdt_core import *
 from pyfunctions.wrappers import TargetNodeDecompositionList
 
 # TODO: automatically check to see if reshape is necessary, because if not, one of the dimensions will already be the right size
