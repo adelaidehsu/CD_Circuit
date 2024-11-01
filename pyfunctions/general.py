@@ -4,7 +4,7 @@ import numpy as np
 import torch
 import collections
 import os
-    
+
 def createDirectory(path):
     """
     * Create a directory at a given path if it does not exist

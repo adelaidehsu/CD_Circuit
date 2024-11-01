@@ -6,6 +6,7 @@ from dataclasses import dataclass
 '''
 These wrapper classes are used to make the GPT modules work with code intended for a HuggingFace
 BERT model.
+This file also contains some helper types for readability.
 '''
 
 class GPTLayerNormWrapper():
@@ -46,6 +47,7 @@ class GPTOutputMatrixWrapper():
         # output matrix is separate per attention head (num_heads, d_value_rank, d_model)
         # other code assumes a concatenated value matrix (d_model, num_heads * d_value_rank)
         old_shape = weight.size()
+        # analogous to the value matrix wrappeExpected size for first two dimensions of batch2 tensor to be: [768, 768] but got: [768, 12].
         new_shape = (old_shape[0] * old_shape[1],) + (old_shape[2],)
         self.weight = (weight.view(new_shape))
         self.weight = self.weight.transpose(0, 1)
@@ -54,7 +56,6 @@ class GPTOutputMatrixWrapper():
         self.bias = bias.view(new_bias_shape)
 
 
-# NOTE: Since we don't do decomposition of attention patterns, maybe this would have been better done by just replacing the entire attention pattern calculation with a method of this attention module. Oh well, we've already verified that this works correctly.
 class GPTAttentionWrapper():
     def __init__(self, attn_module):
         self.attn_module = attn_module
@@ -87,17 +88,6 @@ class GPTAttentionWrapper():
         return self.num_attention_heads * self.attention_head_size
     
 
-'''
-Helper classes for readability.
-'''
-
-'''
-class OutputDecomposition:
-    def __init__(self, source_node, rel, irrel):
-        self.source_node = source_node
-        self.rel = rel
-        self.irrel = irrel
-'''
 class Node(NamedTuple):
     layer_idx: int
     sequence_idx: int
@@ -107,22 +97,17 @@ class Node(NamedTuple):
 # you want to decompose into (rel, irrel) in the forward pass
 # however, it performs a function analogous to ablation in other interpretability techniques,
 # in that we can determine the importance of these nodes
-
-'''
-class AblationSet:
-    def __init__(self, nodes: list[Node]):
-        self.nodes = nodes
-'''
 type AblationSet = tuple[Node]
 
-
 class OutputDecomposition(NamedTuple):
+    # batch_indices: List
     ablation_set: AblationSet
     rel: torch.Tensor
     irrel: torch.Tensor
 
 @dataclass
 class TargetNodeDecompositionList:
+    # batch_indices: List
     ablation_set: AblationSet
     target_nodes: list[Node]
     rels: list[torch.Tensor]
@@ -141,6 +126,7 @@ class TargetNodeDecompositionList:
 
     # hopefully this doesn't slow things down too much with a bunch of reallocations
     def __add__(self, other):
+        # assert self.batch_indices == other.batch_indices
         assert self.ablation_set == other.ablation_set
         s = TargetNodeDecompositionList(self.ablation_set)
         s.target_nodes = self.target_nodes + other.target_nodes

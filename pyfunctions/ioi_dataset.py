@@ -2,9 +2,31 @@
 Copied verbatim from the EasyTransformer repo, which is the one most clearly associated with the IOI paper.
 It seems that the version associated with the ARENA material is more recent than this one, somehow,
 because some of the TODOs have been resolved.
-This version should be good enough for our purposes, and the differences should have minimal effect.
-'''
+This version should be good enough for our purposes, and the differences should have no effect on the results.
+https://github.com/redwoodresearch/Easy-Transformer/commit/ea15315dd24481e9e2ac5c3ef335d82907a1dc34
 
+MIT License
+
+Copyright (c) 2022 neelnanda-io
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+'''
 
 import io
 from logging import warning

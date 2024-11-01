@@ -1,15 +1,16 @@
+'''
+This file contains an example implementation of some functions for the BERT model, analogous to cdt_basic.py.
+The difference for the functions found here are that they "patch" the decomposition of source nodes, which you can
+use to find the decomposition of a model's task objective relative to any source nodes.
+This file may be helpful for understanding the full method, found in cdt_source_to_target.py.
+'''
+
 from pyfunctions.cdt_basic import *
+from pyfunctions.cdt_core import *
+from pyfunctions.cdt_ablations import *
 from pyfunctions.wrappers import AblationSet, Node
 
-def reshape_separate_attention_heads(context_layer, sa_module):
-    new_shape = context_layer.size()[:-1] + (sa_module.num_attention_heads, sa_module.attention_head_size)
-    context_layer = context_layer.view(new_shape)
-    return context_layer
 
-def reshape_concatenate_attention_heads(context_layer, sa_module):
-    new_shape = context_layer.size()[:-2] + (sa_module.all_head_size,)
-    context_layer = context_layer.view(*new_shape)
-    return context_layer
 
 def prop_self_attention_patched(rel, irrel, attention_mask, 
                                 head_mask,
@@ -30,35 +31,6 @@ def prop_self_attention_patched(rel, irrel, attention_mask,
     else:
         return rel_context, irrel_context, None
 
-
-def set_rel_at_source_nodes(rel, irrel, ablation_dict, layer_mean_acts, layer_idx, sa_module, set_irrel_to_mean, device):
-
-    if set_irrel_to_mean and layer_mean_acts is None:
-        print("Tried to set decomposition of source node using mean method but no mean activation tensor provided; returning immediately \
-               (likely the resulting decomposition will be meaningless)")
-    rel = reshape_separate_attention_heads(rel, sa_module)
-    irrel = reshape_separate_attention_heads(irrel, sa_module)
-    if layer_mean_acts is not None:
-        layer_mean_acts = reshape_separate_attention_heads(layer_mean_acts, sa_module)
-        layer_mean_acts = layer_mean_acts[None, :, :, :] # add on a batch dimension
-    
-    for ablation, batch_indices in ablation_dict.items():
-        for source_node in ablation:
-            if source_node.layer_idx != layer_idx:
-                continue
-            sq = source_node.sequence_idx
-            head = source_node.attn_head_idx
-            if set_irrel_to_mean:
-                rel[batch_indices, sq, head, :] = irrel[batch_indices, sq, head, :] + rel[batch_indices, sq, head, :] - torch.Tensor(layer_mean_acts[:, sq, head, :]).to(device)
-                irrel[batch_indices, sq, head, :] = torch.Tensor(layer_mean_acts[:, sq, head, :]).to(device)
-            else:
-                rel[batch_indices, sq, head, :] = irrel[batch_indices, sq, head, :] + rel[batch_indices, sq, head, :]
-                irrel[batch_indices, sq, head, :] = 0
-    
-    rel = reshape_concatenate_attention_heads(rel, sa_module)
-    irrel = reshape_concatenate_attention_heads(irrel, sa_module)
-    
-    return rel, irrel
 
 def prop_attention_patched(rel, irrel, attention_mask, 
                            head_mask, source_nodes, layer_mean_acts, a_module,
