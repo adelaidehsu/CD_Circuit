@@ -34,6 +34,12 @@ from captum.attr import (
 from transformer_lens import HookedTransformer
 from pyfunctions.ioi_dataset import IOIDataset
 
+'''
+Functions to call different interpretation methods for input feature attribution.
+We implemented a wrapper that supprts LIME, SHAP, Layer-integrated-gradients, and CD-T.
+See examples in `notebooks/Local_importance.ipynb` to know how to use it.
+'''
+
 ############ MAIN FUNCTIONS TO CALL ############
 def load_data_and_model(data_name, model_type, device):
     identifier = f'{data_name}_{model_type}'

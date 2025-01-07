@@ -5,6 +5,10 @@ import random
 from methods.bag_of_ngrams.processing import stripChars
 from random import shuffle
 
+'''
+Utility functions for the pathology report dataset we use as an example to demonstrate CD-T on BERTs.
+'''
+
 kidney_fields = {'classification': ['HistologicType_H','LymphovascularInvasion_L','Margins_Ma','Procedure_Pr',
                                      'SpecimenLaterality_S','TumorExtension_TumorE','TumorSite_T'],
                  'token_extraction': ['MRN_M0','AccessionNumber_A0', 'NumberOfLymphNodesExamined_Nu0',
