@@ -184,6 +184,7 @@ def add_mean_ablation_hook(
     # Compute the mean of each head's output on the ABC dataset, grouped by template
     if means_dataset is not None:
         means = compute_means_by_template(means_dataset, model)
+        batch_size, seq_len = len(means_dataset), means_dataset.max_len
     else:
         means = patch_values # just patch in these values, shape is "layer batch seq head_idx d_head"
         # or else "layer seq head_idx d_head"
