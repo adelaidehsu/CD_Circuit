@@ -161,25 +161,25 @@ def prop_BERT_attention_hh(rel, irrel, attention_mask,
                                                                         a_module.self,
                                                                         att_probs)
         
-    normalize_rel_irrel(rel_context, irrel_context)
+    # now that we've calculated the output of the attention mechanism, set desired inputs to "relevant"
+    rel_context, irrel_context = set_rel_at_source_nodes(rel_context, irrel_context, ablation_list, layer_mean_acts, level, a_module.self, set_irrel_to_mean, device)
     
     output_module = a_module.output
     rel_dense, irrel_dense = prop_linear(rel_context, irrel_context, output_module.dense)
-    normalize_rel_irrel(rel_dense, irrel_dense)
+    #normalize_rel_irrel(rel_dense, irrel_dense)
     
     rel_tot = rel_dense + rel
     irrel_tot = irrel_dense + irrel
-    normalize_rel_irrel(rel_tot, irrel_tot)
+    #normalize_rel_irrel(rel_tot, irrel_tot)
 
-    # now that we've calculated the output of the attention mechanism, set desired inputs to "relevant"
-    rel_tot, irrel_tot = set_rel_at_source_nodes(rel_tot, irrel_tot, ablation_list, layer_mean_acts, level, a_module.self, set_irrel_to_mean, device)
+    
     
     target_decomps = calculate_contributions(rel_tot, irrel_tot, ablation_list,
                                                                            target_nodes, level,
                                                                            a_module.self, device=device)
     rel_out, irrel_out = prop_layer_norm(rel_tot, irrel_tot, output_module.LayerNorm)
     
-    normalize_rel_irrel(rel_out, irrel_out)
+    #normalize_rel_irrel(rel_out, irrel_out)
     
     return rel_out, irrel_out, target_decomps, returned_att_probs
 
